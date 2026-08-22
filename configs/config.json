@@ -1,0 +1,11 @@
+{
+  "epochs": 2000,
+  "rollout_size": 64,
+  "episode_len": 100,
+  "gamma": 0.99,
+  "learning_rate": 0.05,
+  "grid_size": 36,
+  "hidden_size": 128,
+  "seed": 42,
+  "workers": 8
+}
