@@ -102,6 +102,49 @@ func (dst *Matrix) Sub(a, b *Matrix) error {
 	return nil
 }
 
+// Mul computes dst = a * b elementwise (the Hadamard product, not the
+// matrix product — see MatMul for that).
+func (dst *Matrix) Mul(a, b *Matrix) error {
+	if err := checkSameShape(a, b); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, a); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		dst.Data[i] = a.Data[i] * b.Data[i]
+	}
+	return nil
+}
+
+// Min computes dst = min(a, b) elementwise.
+func (dst *Matrix) Min(a, b *Matrix) error {
+	if err := checkSameShape(a, b); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, a); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		dst.Data[i] = min(a.Data[i], b.Data[i])
+	}
+	return nil
+}
+
+// Neg computes dst = -in elementwise.
+func (dst *Matrix) Neg(in *Matrix) error {
+	if err := checkSameShape(dst, in); err != nil {
+		return err
+	}
+
+	for i, v := range in.Data {
+		dst.Data[i] = -v
+	}
+	return nil
+}
+
 // MatMul computes dst = op(a) * op(b), where op(x) is x or its transpose
 // depending on transposeA/transposeB. If zeroOut is true, dst is cleared
 // first; otherwise results are accumulated into dst's existing values
@@ -234,6 +277,33 @@ func (dst *Matrix) Softmax(in *Matrix) error {
 	return nil
 }
 
+// Exp computes dst = exp(in) elementwise.
+func (dst *Matrix) Exp(in *Matrix) error {
+	if err := checkSameShape(dst, in); err != nil {
+		return err
+	}
+
+	for i, v := range in.Data {
+		dst.Data[i] = float32(math.Exp(float64(v)))
+	}
+	return nil
+}
+
+// Log computes dst = log(max(in, probEpsilon)) elementwise, using the
+// same epsilon clamp as ReinforceLoss so that Log(0) (or any near-zero
+// or negative input) cannot produce -Inf or NaN.
+func (dst *Matrix) Log(in *Matrix) error {
+	if err := checkSameShape(dst, in); err != nil {
+		return err
+	}
+
+	for i, v := range in.Data {
+		clamped := max(v, probEpsilon)
+		dst.Data[i] = float32(math.Log(float64(clamped)))
+	}
+	return nil
+}
+
 // ReinforceLoss computes the REINFORCE policy-gradient loss,
 // dst[i] = -log(max(probs[i], probEpsilon)) * advantages[i],
 // elementwise. See docs/03-policy-gradients-and-reinforce.md for what this
@@ -311,6 +381,102 @@ func (dst *Matrix) SoftmaxAddGrad(softmaxOut, grad *Matrix) error {
 
 	for i, s := range softmaxOut.Data {
 		dst.Data[i] += s * (grad.Data[i] - dot)
+	}
+	return nil
+}
+
+// MulAddGrad accumulates the gradient of elementwise Mul with respect to
+// one of its two inputs into dst: dst[i] += other[i] * grad[i], where
+// other is the *other* input's forward value (since d(a*b)/da = b and,
+// symmetrically, d(a*b)/db = a).
+func (dst *Matrix) MulAddGrad(other, grad *Matrix) error {
+	if err := checkSameShape(dst, other); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		dst.Data[i] += other.Data[i] * grad.Data[i]
+	}
+	return nil
+}
+
+// MinAddGrad accumulates the gradient of elementwise Min(a, b) into dst,
+// which must be the gradient buffer belonging to a if dstIsA is true, or
+// to b otherwise: dst[i] += grad[i] wherever the input dst belongs to is
+// the smaller of the two at that position. At a tie (a[i] == b[i]), the
+// gradient is routed to a only, so that the two calls needed to
+// backpropagate through Min (one per input) never double-count a tied
+// element between them — mirroring how ReLUAddGrad picks one side of its
+// own kink at zero rather than splitting the gradient.
+func (dst *Matrix) MinAddGrad(a, b, grad *Matrix, dstIsA bool) error {
+	if err := checkSameShape(a, b); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, a); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		aIsSmallerOrTied := a.Data[i] <= b.Data[i]
+		if aIsSmallerOrTied == dstIsA {
+			dst.Data[i] += grad.Data[i]
+		}
+	}
+	return nil
+}
+
+// NegAddGrad accumulates the gradient of elementwise Neg into dst:
+// dst[i] -= grad[i], since d(-x)/dx = -1.
+func (dst *Matrix) NegAddGrad(grad *Matrix) error {
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		dst.Data[i] -= grad.Data[i]
+	}
+	return nil
+}
+
+// ExpAddGrad accumulates the gradient of elementwise Exp into dst:
+// dst[i] += grad[i] * expOut[i]. expOut is Exp's already-computed
+// forward output rather than its input, since d(exp(x))/dx = exp(x) and
+// reusing the forward value avoids recomputing it.
+func (dst *Matrix) ExpAddGrad(expOut, grad *Matrix) error {
+	if err := checkSameShape(dst, expOut); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		dst.Data[i] += grad.Data[i] * expOut.Data[i]
+	}
+	return nil
+}
+
+// LogAddGrad accumulates the gradient of elementwise Log into dst:
+// dst[i] += grad[i] / max(in[i], probEpsilon), matching Log's own
+// forward clamp so the two stay consistent for inputs at or below
+// probEpsilon.
+func (dst *Matrix) LogAddGrad(in, grad *Matrix) error {
+	if err := checkSameShape(dst, in); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i, v := range in.Data {
+		clamped := max(v, probEpsilon)
+		dst.Data[i] += grad.Data[i] / clamped
 	}
 	return nil
 }

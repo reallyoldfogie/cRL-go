@@ -153,6 +153,124 @@ func TestSoftmaxAddGrad(t *testing.T) {
 	assert.InDelta(t, -0.1875, dst.Data[1], 1e-6)
 }
 
+func TestMulComputesHadamardProduct(t *testing.T) {
+	a := &Matrix{Rows: 1, Cols: 3, Data: []float32{2, 3, 4}}
+	b := &Matrix{Rows: 1, Cols: 3, Data: []float32{5, 6, 7}}
+	out := New(1, 3)
+
+	require.NoError(t, out.Mul(a, b))
+	assert.Equal(t, []float32{10, 18, 28}, out.Data)
+}
+
+func TestMulReportsShapeMismatch(t *testing.T) {
+	a := New(1, 3)
+	b := New(1, 2)
+	out := New(1, 3)
+	assert.Error(t, out.Mul(a, b))
+}
+
+func TestMinComputesElementwiseMinimum(t *testing.T) {
+	a := &Matrix{Rows: 1, Cols: 3, Data: []float32{1, 5, -2}}
+	b := &Matrix{Rows: 1, Cols: 3, Data: []float32{3, 2, -2}}
+	out := New(1, 3)
+
+	require.NoError(t, out.Min(a, b))
+	assert.Equal(t, []float32{1, 2, -2}, out.Data)
+}
+
+func TestNegNegatesElementwise(t *testing.T) {
+	in := &Matrix{Rows: 1, Cols: 3, Data: []float32{1, -2, 0}}
+	out := New(1, 3)
+
+	require.NoError(t, out.Neg(in))
+	assert.Equal(t, []float32{-1, 2, 0}, out.Data)
+}
+
+func TestExpMatchesMathExp(t *testing.T) {
+	in := &Matrix{Rows: 1, Cols: 3, Data: []float32{0, 1, -1}}
+	out := New(1, 3)
+
+	require.NoError(t, out.Exp(in))
+	assert.InDelta(t, 1.0, out.Data[0], 1e-6)
+	assert.InDelta(t, math.E, out.Data[1], 1e-4)
+	assert.InDelta(t, 1.0/math.E, out.Data[2], 1e-4)
+}
+
+func TestLogClampsNonPositiveInputs(t *testing.T) {
+	in := &Matrix{Rows: 1, Cols: 2, Data: []float32{0, 1}}
+	out := New(1, 2)
+
+	require.NoError(t, out.Log(in))
+
+	// log(0) would be -Inf without the epsilon clamp; instead it should
+	// be a large but finite negative number.
+	assert.False(t, math.IsInf(float64(out.Data[0]), 0))
+	assert.False(t, math.IsNaN(float64(out.Data[0])))
+	// log(1) == 0.
+	assert.InDelta(t, 0.0, out.Data[1], 1e-6)
+}
+
+func TestMulAddGradAccumulates(t *testing.T) {
+	other := &Matrix{Rows: 1, Cols: 1, Data: []float32{3}}
+	grad := &Matrix{Rows: 1, Cols: 1, Data: []float32{2}}
+	dst := &Matrix{Rows: 1, Cols: 1, Data: []float32{10}} // pre-existing gradient to accumulate onto
+
+	require.NoError(t, dst.MulAddGrad(other, grad))
+
+	// 10 + 3*2 == 16
+	assert.InDelta(t, 16.0, dst.Data[0], 1e-6)
+}
+
+func TestNegAddGradAccumulates(t *testing.T) {
+	grad := &Matrix{Rows: 1, Cols: 1, Data: []float32{2}}
+	dst := &Matrix{Rows: 1, Cols: 1, Data: []float32{10}}
+
+	require.NoError(t, dst.NegAddGrad(grad))
+
+	// 10 - 2 == 8
+	assert.InDelta(t, 8.0, dst.Data[0], 1e-6)
+}
+
+func TestExpAddGradAccumulates(t *testing.T) {
+	expOut := &Matrix{Rows: 1, Cols: 1, Data: []float32{2}} // pretend exp(in) == 2
+	grad := &Matrix{Rows: 1, Cols: 1, Data: []float32{3}}
+	dst := &Matrix{Rows: 1, Cols: 1, Data: []float32{10}}
+
+	require.NoError(t, dst.ExpAddGrad(expOut, grad))
+
+	// 10 + 3*2 == 16
+	assert.InDelta(t, 16.0, dst.Data[0], 1e-6)
+}
+
+func TestLogAddGradAccumulates(t *testing.T) {
+	in := &Matrix{Rows: 1, Cols: 1, Data: []float32{0.5}}
+	grad := &Matrix{Rows: 1, Cols: 1, Data: []float32{2}}
+	dst := &Matrix{Rows: 1, Cols: 1, Data: []float32{10}}
+
+	require.NoError(t, dst.LogAddGrad(in, grad))
+
+	// 10 + 2/0.5 == 14
+	assert.InDelta(t, 14.0, dst.Data[0], 1e-6)
+}
+
+func TestMinAddGradRoutesToSmallerInputAndTiesToA(t *testing.T) {
+	a := &Matrix{Rows: 1, Cols: 2, Data: []float32{1, 2}}
+	b := &Matrix{Rows: 1, Cols: 2, Data: []float32{2, 2}} // position 1 is a tie
+	grad := &Matrix{Rows: 1, Cols: 2, Data: []float32{5, 5}}
+
+	dstA := New(1, 2)
+	require.NoError(t, dstA.MinAddGrad(a, b, grad, true))
+	// position 0: a < b, so a receives the gradient. position 1: a tie,
+	// which is routed to a by convention.
+	assert.Equal(t, []float32{5, 5}, dstA.Data)
+
+	dstB := New(1, 2)
+	require.NoError(t, dstB.MinAddGrad(a, b, grad, false))
+	// position 0: a < b, so b receives nothing. position 1: a tie, which
+	// is routed to a, so b also receives nothing.
+	assert.Equal(t, []float32{0, 0}, dstB.Data)
+}
+
 func TestFillRandStaysWithinBounds(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	m := New(10, 10)

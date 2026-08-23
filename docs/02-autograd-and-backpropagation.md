@@ -20,7 +20,7 @@ This is powerful because it means we never need to differentiate the whole netwo
 
 ## Computational graphs
 
-`pkg/autograd` represents the network as a **computational graph**: a directed graph of `Var` nodes (see `pkg/autograd/var.go`), where each non-leaf `Var` was computed by applying some `Op` (ReLU, Softmax, Add, Sub, MatMul, or the REINFORCE loss — see `pkg/autograd/ops.go`) to one or two other `Var`s.
+`pkg/autograd` represents the network as a **computational graph**: a directed graph of `Var` nodes (see `pkg/autograd/var.go`), where each non-leaf `Var` was computed by applying some `Op` (ReLU, Softmax, Add, Sub, Mul, Min, Neg, Exp, Log, MatMul, or the REINFORCE loss — see `pkg/autograd/ops.go`) to one or two other `Var`s.
 
 - **Leaf** `Var`s have no `Op` — they're either network inputs (the state vector) or a network's raw parameters (weights/biases).
 - Every other `Var` was computed by some `Op` from its `Inputs`.
@@ -55,6 +55,10 @@ input.Grad[i] += softmaxOut[i] * (grad[i] - dot(grad, softmaxOut))
 This looks more complex than ReLU's or Add's backward rules because softmax's output depends on the *sum* of all its inputs (through the normalization step), so changing one input slightly affects every output, not just the corresponding one. Working through the calculus, the gradient of softmax's output with respect to its input turns out to have exactly this "each output's own gradient contribution, minus how much it participates in the shared normalization" shape. The `dot(grad, softmaxOut)` term is exactly that shared correction.
 
 You don't need to re-derive this to use it — the point of `pkg/autograd` is that this derivation only needs to happen once per operation (in `pkg/mat`/`pkg/autograd/ops.go`), and then any graph built out of these operations gets correct gradients "for free," no matter how the operations are combined.
+
+## Elementwise ops beyond REINFORCE
+
+Add, Sub, Mul, Min, Neg, Exp, and Log are all elementwise: each output element depends only on the corresponding input element(s), which is what keeps their `Backward` rules simple compared to softmax's (no cross-element interaction). Mul, Min, Neg, Exp, and Log exist specifically so that objectives more complex than REINFORCE's `-log(p) * advantage` can be composed from existing graph nodes rather than requiring a new hand-written `Op` per objective — for example, a clipped probability-ratio objective needs `exp(logNew - logOld)` and a `min(...)` between two candidate surrogate values, both expressible with these primitives. `TestGradientCheckExpOfSubComposition` in `pkg/autograd/gradcheck_test.go` demonstrates exactly this kind of composition (`Exp` of a `Sub`).
 
 ## Validating this actually works: gradient checking
 

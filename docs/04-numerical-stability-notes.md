@@ -31,6 +31,8 @@ dst.Data[i] = float32(-math.Log(float64(clamped))) * advantages.Data[i]
 
 `log(0)` is `-Inf` (`log` of a number approaching zero from above diverges to negative infinity), and `1/0` in the gradient formula (`ReinforceAddGrad` divides by the probability) is similarly undefined. In principle, softmax's output is always strictly positive (since `exp` of any finite number is positive), so a probability should never be *exactly* zero — but `float32` has limited precision, and if the network becomes extremely confident an action is wrong, the true probability can underflow to a `float32` zero even though the mathematically "true" probability was just extremely small. Clamping to a tiny positive floor (`1e-8`) avoids `-Inf`/`NaN` in that edge case while barely affecting the result any time the probability isn't already vanishingly small.
 
+The general-purpose `Log`/`LogAddGrad` ops (also in `pkg/mat/mat.go`, added for objectives beyond REINFORCE's own loss) reuse this exact same `probEpsilon` clamp, so any caller taking the log of a probability-like value gets the same safeguard without re-deriving it.
+
 ## Clamping variance to zero before taking a square root
 
 `returnStatistics` in `pkg/reinforce/returns.go` computes variance with the "naive" one-pass formula:

@@ -3,7 +3,7 @@
 A Go reimplementation based on [`harshbhatt7585/cRL`](https://github.com/harshbhatt7585/cRL) — a small, from-scratch reinforcement learning library. This port trains a policy network to play a simple grid-foraging game using REINFORCE, with:
 
 - A stdlib-only autograd engine (`pkg/autograd`), built around Go interfaces rather than the original's hand-rolled function-pointer vtable.
-- A small dense matrix library (`pkg/mat`) with the matrix ops, activations, and REINFORCE loss/gradients needed by the network.
+- A small dense matrix library (`pkg/mat`) with the matrix ops, activations, REINFORCE loss/gradients, and general-purpose elementwise ops (multiply, min, negate, exp, log) for composing policy-gradient objectives beyond REINFORCE.
 - A 3-layer MLP policy network (`pkg/policy`) with Xavier/Glorot initialization, and JSON checkpoint save/load so training can resume across sessions.
 - An environment-agnostic training core (`pkg/rl`) with two example environments: a grid-foraging environment (`pkg/snakeenv`) and a goal-seeking gridworld (`pkg/gridworldenv`).
 - A REINFORCE trainer (`pkg/reinforce`) with concurrent rollout collection.

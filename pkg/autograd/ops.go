@@ -104,6 +104,116 @@ func (subOp) Backward(v *Var) {
 	}
 }
 
+// mulOp is elementwise (Hadamard) multiplication, distinct from
+// matMulOp's matrix product.
+type mulOp struct{}
+
+func (mulOp) NumInputs() int                        { return 2 }
+func (mulOp) Shape(inputs ...*Var) (int, int, bool) { return sameShape(inputs...) }
+
+func (mulOp) Forward(v *Var) {
+	_ = v.Val.Mul(v.Inputs[0].Val, v.Inputs[1].Val)
+}
+
+func (mulOp) Backward(v *Var) {
+	a, b := v.Inputs[0], v.Inputs[1]
+	if requiresGrad(a) {
+		_ = a.Grad.MulAddGrad(b.Val, v.Grad)
+	}
+	if requiresGrad(b) {
+		_ = b.Grad.MulAddGrad(a.Val, v.Grad)
+	}
+}
+
+// minOp is elementwise minimum.
+type minOp struct{}
+
+func (minOp) NumInputs() int                        { return 2 }
+func (minOp) Shape(inputs ...*Var) (int, int, bool) { return sameShape(inputs...) }
+
+func (minOp) Forward(v *Var) {
+	_ = v.Val.Min(v.Inputs[0].Val, v.Inputs[1].Val)
+}
+
+func (minOp) Backward(v *Var) {
+	a, b := v.Inputs[0], v.Inputs[1]
+	if requiresGrad(a) {
+		_ = a.Grad.MinAddGrad(a.Val, b.Val, v.Grad, true)
+	}
+	if requiresGrad(b) {
+		_ = b.Grad.MinAddGrad(a.Val, b.Val, v.Grad, false)
+	}
+}
+
+// negOp is elementwise negation.
+type negOp struct{}
+
+func (negOp) NumInputs() int { return 1 }
+
+func (negOp) Shape(inputs ...*Var) (int, int, bool) {
+	if inputs[0] == nil {
+		return 0, 0, false
+	}
+	return inputs[0].Val.Rows, inputs[0].Val.Cols, true
+}
+
+func (negOp) Forward(v *Var) {
+	_ = v.Val.Neg(v.Inputs[0].Val)
+}
+
+func (negOp) Backward(v *Var) {
+	input := v.Inputs[0]
+	if requiresGrad(input) {
+		_ = input.Grad.NegAddGrad(v.Grad)
+	}
+}
+
+// expOp is elementwise exponentiation.
+type expOp struct{}
+
+func (expOp) NumInputs() int { return 1 }
+
+func (expOp) Shape(inputs ...*Var) (int, int, bool) {
+	if inputs[0] == nil {
+		return 0, 0, false
+	}
+	return inputs[0].Val.Rows, inputs[0].Val.Cols, true
+}
+
+func (expOp) Forward(v *Var) {
+	_ = v.Val.Exp(v.Inputs[0].Val)
+}
+
+func (expOp) Backward(v *Var) {
+	input := v.Inputs[0]
+	if requiresGrad(input) {
+		_ = input.Grad.ExpAddGrad(v.Val, v.Grad)
+	}
+}
+
+// logOp is elementwise natural log.
+type logOp struct{}
+
+func (logOp) NumInputs() int { return 1 }
+
+func (logOp) Shape(inputs ...*Var) (int, int, bool) {
+	if inputs[0] == nil {
+		return 0, 0, false
+	}
+	return inputs[0].Val.Rows, inputs[0].Val.Cols, true
+}
+
+func (logOp) Forward(v *Var) {
+	_ = v.Val.Log(v.Inputs[0].Val)
+}
+
+func (logOp) Backward(v *Var) {
+	input := v.Inputs[0]
+	if requiresGrad(input) {
+		_ = input.Grad.LogAddGrad(input.Val, v.Grad)
+	}
+}
+
 // matMulOp is matrix multiplication: out = a * b.
 type matMulOp struct{}
 
@@ -173,6 +283,33 @@ func Add(a, b *Var) (*Var, error) {
 // Sub returns a new Var computing a - b elementwise.
 func Sub(a, b *Var) (*Var, error) {
 	return newNode(subOp{}, a, b)
+}
+
+// Mul returns a new Var computing a * b elementwise (the Hadamard
+// product; see MatMul for the matrix product).
+func Mul(a, b *Var) (*Var, error) {
+	return newNode(mulOp{}, a, b)
+}
+
+// Min returns a new Var computing elementwise min(a, b).
+func Min(a, b *Var) (*Var, error) {
+	return newNode(minOp{}, a, b)
+}
+
+// Neg returns a new Var computing elementwise -input.
+func Neg(input *Var) (*Var, error) {
+	return newNode(negOp{}, input)
+}
+
+// Exp returns a new Var computing elementwise exp(input).
+func Exp(input *Var) (*Var, error) {
+	return newNode(expOp{}, input)
+}
+
+// Log returns a new Var computing elementwise log(max(input, probEpsilon)),
+// clamped the same way mat.Matrix.Log is, so it never produces -Inf or NaN.
+func Log(input *Var) (*Var, error) {
+	return newNode(logOp{}, input)
 }
 
 // MatMul returns a new Var computing the matrix product a * b.

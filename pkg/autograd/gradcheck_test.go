@@ -174,6 +174,120 @@ func TestGradientCheckReinforceLoss(t *testing.T) {
 	assertMatricesClose(t, probs.Grad, numericalGradient(probs, out, graph.Forward), gradCheckTolerance)
 }
 
+func TestGradientCheckMul(t *testing.T) {
+	rng := rand.New(rand.NewPCG(13, 17))
+
+	a := NewVar(3, 1, FlagRequiresGrad)
+	a.Val.FillRand(rng, -1, 1)
+	b := NewVar(3, 1, FlagRequiresGrad)
+	b.Val.FillRand(rng, -1, 1)
+
+	out, err := Mul(a, b)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, a.Grad, numericalGradient(a, out, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, b.Grad, numericalGradient(b, out, graph.Forward), gradCheckTolerance)
+}
+
+func TestGradientCheckNeg(t *testing.T) {
+	rng := rand.New(rand.NewPCG(19, 23))
+
+	x := NewVar(4, 1, FlagRequiresGrad)
+	x.Val.FillRand(rng, -1, 1)
+
+	out, err := Neg(x)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, x.Grad, numericalGradient(x, out, graph.Forward), gradCheckTolerance)
+}
+
+func TestGradientCheckExp(t *testing.T) {
+	rng := rand.New(rand.NewPCG(29, 31))
+
+	x := NewVar(4, 1, FlagRequiresGrad)
+	x.Val.FillRand(rng, -1, 1)
+
+	out, err := Exp(x)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, x.Grad, numericalGradient(x, out, graph.Forward), gradCheckTolerance)
+}
+
+func TestGradientCheckLog(t *testing.T) {
+	// Fixed, comfortably-positive values, well away from Log's
+	// probEpsilon clamp, so the check exercises the ordinary
+	// d/dx log(x) = 1/x branch rather than the clamp.
+	x := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 4, Cols: 1, Data: []float32{0.2, 0.5, 1.0, 2.0}}}
+	x.Grad = mat.New(4, 1)
+
+	out, err := Log(x)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, x.Grad, numericalGradient(x, out, graph.Forward), gradCheckTolerance)
+}
+
+func TestGradientCheckMin(t *testing.T) {
+	// Fixed, comfortably-distinct values at every position (no ties, and
+	// no pair closer than numericalGradient's perturbation could flip):
+	// gradient-checking Min at a tie is inherently unstable in the same
+	// way TestGradientCheckReLU avoids landing exactly on ReLU's kink at
+	// zero.
+	a := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 3, Cols: 1, Data: []float32{-1.0, 0.5, 2.0}}}
+	a.Grad = mat.New(3, 1)
+	b := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 3, Cols: 1, Data: []float32{1.0, -0.5, 0.1}}}
+	b.Grad = mat.New(3, 1)
+
+	out, err := Min(a, b)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, a.Grad, numericalGradient(a, out, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, b.Grad, numericalGradient(b, out, graph.Forward), gradCheckTolerance)
+}
+
+// TestGradientCheckExpOfSubComposition composes Sub and Exp the same way
+// a PPO probability ratio would (exp(logNew - logOld)), confirming the
+// two new ops chain correctly rather than only working in isolation.
+func TestGradientCheckExpOfSubComposition(t *testing.T) {
+	rng := rand.New(rand.NewPCG(37, 41))
+
+	a := NewVar(3, 1, FlagRequiresGrad)
+	a.Val.FillRand(rng, -1, 1)
+	b := NewVar(3, 1, FlagRequiresGrad)
+	b.Val.FillRand(rng, -1, 1)
+
+	diff, err := Sub(a, b)
+	require.NoError(t, err)
+	out, err := Exp(diff)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, a.Grad, numericalGradient(a, out, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, b.Grad, numericalGradient(b, out, graph.Forward), gradCheckTolerance)
+}
+
 // TestGradientCheckSmallNetworkEndToEnd builds a graph with the same shape
 // as the policy network's forward+loss computation (matmul -> add -> relu
 // -> matmul -> add -> softmax -> reinforce loss) and checks the gradient
