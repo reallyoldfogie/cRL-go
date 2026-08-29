@@ -120,7 +120,7 @@ func (tr *Trainer) Params() *policy.Params {
 // RunEpoch runs one full training epoch (rollout collection, return/
 // advantage computation, gradient accumulation, and one SGD step) and
 // returns summary statistics. epoch is used only to derive this epoch's
-// worker RNG seeds (see workerRNG) and to populate EpochStats.Epoch.
+// worker RNG seeds (see WorkerRNG) and to populate EpochStats.Epoch.
 func (tr *Trainer) RunEpoch(epoch int) (EpochStats, error) {
 	episodes, err := tr.collectRollouts(epoch)
 	if err != nil {
@@ -176,7 +176,7 @@ func (tr *Trainer) collectRollouts(epoch int) ([]*rl.Episode, error) {
 			defer wg.Done()
 			defer func() { <-semaphore }()
 
-			rng := workerRNG(tr.settings.Seed, epoch, index)
+			rng := WorkerRNG(tr.settings.Seed, epoch, index)
 			episode, err := collectTrajectory(tr.params, tr.envFactory, tr.settings.EpisodeLen, rng)
 			episodes[index] = episode
 			errs[index] = err

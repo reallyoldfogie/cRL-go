@@ -42,6 +42,29 @@ type Settings struct {
 	// Workers is the number of goroutines used for concurrent rollout
 	// collection.
 	Workers int `json:"workers"`
+
+	// ClipEpsilon bounds how far pkg/ppo's probability ratio is allowed
+	// to move (to [1-ClipEpsilon, 1+ClipEpsilon]) before the clipped
+	// surrogate objective stops rewarding further movement in that
+	// direction.
+	ClipEpsilon float32 `json:"clip_eps"`
+	// EntropyCoef scales the entropy bonus subtracted from pkg/ppo's
+	// loss, encouraging continued exploration.
+	EntropyCoef float32 `json:"entropy_coef"`
+	// ValueCoef scales the value-function squared-error loss relative to
+	// the clipped-surrogate policy loss in pkg/ppo's combined objective.
+	ValueCoef float32 `json:"value_coef"`
+	// GAELambda is the lambda parameter of Generalized Advantage
+	// Estimation (see pkg/ppo's computeGAE): 0 recovers a one-step TD
+	// advantage, 1 recovers the plain discounted reward-to-go.
+	GAELambda float32 `json:"gae_lambda"`
+	// PPOEpochs is the number of shuffled-minibatch passes pkg/ppo's
+	// trainer makes over each collected batch of rollouts before
+	// discarding it and collecting a new one.
+	PPOEpochs int `json:"ppo_epochs"`
+	// MinibatchSize is the number of individual (observation, action,
+	// ...) steps pkg/ppo's trainer includes in each Adam update.
+	MinibatchSize int `json:"minibatch_size"`
 }
 
 // Default returns the out-of-the-box hyperparameters, matching the
@@ -49,15 +72,21 @@ type Settings struct {
 // where noted in docs/05-porting-notes.md.
 func Default() Settings {
 	return Settings{
-		Epochs:       2000,
-		RolloutSize:  64,
-		EpisodeLen:   100,
-		Gamma:        0.99,
-		LearningRate: 0.05,
-		GridSize:     36,
-		HiddenSize:   128,
-		Seed:         42,
-		Workers:      runtime.NumCPU(),
+		Epochs:        2000,
+		RolloutSize:   64,
+		EpisodeLen:    100,
+		Gamma:         0.99,
+		LearningRate:  0.05,
+		GridSize:      36,
+		HiddenSize:    128,
+		Seed:          42,
+		Workers:       runtime.NumCPU(),
+		ClipEpsilon:   0.2,
+		EntropyCoef:   0.01,
+		ValueCoef:     0.5,
+		GAELambda:     0.95,
+		PPOEpochs:     4,
+		MinibatchSize: 64,
 	}
 }
 
@@ -98,6 +127,24 @@ func (s Settings) Validate() error {
 	}
 	if s.Workers <= 0 {
 		return fmt.Errorf("config: workers must be positive, got %d", s.Workers)
+	}
+	if s.ClipEpsilon <= 0 {
+		return fmt.Errorf("config: clip_eps must be positive, got %g", s.ClipEpsilon)
+	}
+	if s.EntropyCoef < 0 {
+		return fmt.Errorf("config: entropy_coef must not be negative, got %g", s.EntropyCoef)
+	}
+	if s.ValueCoef < 0 {
+		return fmt.Errorf("config: value_coef must not be negative, got %g", s.ValueCoef)
+	}
+	if s.GAELambda < 0 || s.GAELambda > 1 {
+		return fmt.Errorf("config: gae_lambda must be in [0, 1], got %g", s.GAELambda)
+	}
+	if s.PPOEpochs <= 0 {
+		return fmt.Errorf("config: ppo_epochs must be positive, got %d", s.PPOEpochs)
+	}
+	if s.MinibatchSize <= 0 {
+		return fmt.Errorf("config: minibatch_size must be positive, got %d", s.MinibatchSize)
 	}
 	return nil
 }

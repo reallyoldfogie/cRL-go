@@ -48,6 +48,45 @@ func TestValidateAcceptsDefaults(t *testing.T) {
 	assert.NoError(t, Default().Validate())
 }
 
+func TestValidateRejectsNonPositiveClipEpsilon(t *testing.T) {
+	settings := Default()
+	settings.ClipEpsilon = 0
+	assert.Error(t, settings.Validate())
+}
+
+func TestValidateRejectsNegativeEntropyCoef(t *testing.T) {
+	settings := Default()
+	settings.EntropyCoef = -0.01
+	assert.Error(t, settings.Validate())
+}
+
+func TestValidateRejectsNegativeValueCoef(t *testing.T) {
+	settings := Default()
+	settings.ValueCoef = -0.5
+	assert.Error(t, settings.Validate())
+}
+
+func TestValidateRejectsOutOfRangeGAELambda(t *testing.T) {
+	settings := Default()
+	settings.GAELambda = 1.5
+	assert.Error(t, settings.Validate())
+
+	settings.GAELambda = -0.1
+	assert.Error(t, settings.Validate())
+}
+
+func TestValidateRejectsNonPositivePPOEpochs(t *testing.T) {
+	settings := Default()
+	settings.PPOEpochs = 0
+	assert.Error(t, settings.Validate())
+}
+
+func TestValidateRejectsNonPositiveMinibatchSize(t *testing.T) {
+	settings := Default()
+	settings.MinibatchSize = 0
+	assert.Error(t, settings.Validate())
+}
+
 func TestApplyOnlyOverridesExplicitlyPassedFlags(t *testing.T) {
 	settings := Default()
 

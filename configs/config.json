@@ -7,5 +7,11 @@
   "grid_size": 36,
   "hidden_size": 128,
   "seed": 42,
-  "workers": 8
+  "workers": 8,
+  "clip_eps": 0.2,
+  "entropy_coef": 0.01,
+  "value_coef": 0.5,
+  "gae_lambda": 0.95,
+  "ppo_epochs": 4,
+  "minibatch_size": 64
 }

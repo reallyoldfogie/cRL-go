@@ -19,6 +19,13 @@ type FlagOverrides struct {
 	HiddenSize   int
 	Seed         uint64
 	Workers      int
+
+	ClipEpsilon   float64
+	EntropyCoef   float64
+	ValueCoef     float64
+	GAELambda     float64
+	PPOEpochs     int
+	MinibatchSize int
 }
 
 // RegisterFlags registers every Settings field as a flag on fs and
@@ -36,6 +43,12 @@ func RegisterFlags(fs *flag.FlagSet) *FlagOverrides {
 	fs.IntVar(&o.HiddenSize, "hidden-size", 0, "hidden layer width (overrides config file)")
 	fs.Uint64Var(&o.Seed, "seed", 0, "master RNG seed (overrides config file)")
 	fs.IntVar(&o.Workers, "workers", 0, "number of concurrent rollout workers (overrides config file)")
+	fs.Float64Var(&o.ClipEpsilon, "clip-eps", 0, "PPO probability-ratio clip bound (overrides config file)")
+	fs.Float64Var(&o.EntropyCoef, "entropy-coef", 0, "PPO entropy bonus coefficient (overrides config file)")
+	fs.Float64Var(&o.ValueCoef, "value-coef", 0, "PPO value-loss coefficient (overrides config file)")
+	fs.Float64Var(&o.GAELambda, "gae-lambda", 0, "GAE lambda parameter (overrides config file)")
+	fs.IntVar(&o.PPOEpochs, "ppo-epochs", 0, "minibatch passes per collected PPO batch (overrides config file)")
+	fs.IntVar(&o.MinibatchSize, "minibatch-size", 0, "PPO minibatch size (overrides config file)")
 
 	return o
 }
@@ -65,6 +78,18 @@ func Apply(settings *Settings, fs *flag.FlagSet, o *FlagOverrides) {
 			settings.Seed = o.Seed
 		case "workers":
 			settings.Workers = o.Workers
+		case "clip-eps":
+			settings.ClipEpsilon = float32(o.ClipEpsilon)
+		case "entropy-coef":
+			settings.EntropyCoef = float32(o.EntropyCoef)
+		case "value-coef":
+			settings.ValueCoef = float32(o.ValueCoef)
+		case "gae-lambda":
+			settings.GAELambda = float32(o.GAELambda)
+		case "ppo-epochs":
+			settings.PPOEpochs = o.PPOEpochs
+		case "minibatch-size":
+			settings.MinibatchSize = o.MinibatchSize
 		}
 	})
 }

@@ -14,7 +14,7 @@ func splitmix64(x uint64) uint64 {
 	return z ^ (z >> 31)
 }
 
-// workerRNG deterministically derives an independent random source for
+// WorkerRNG deterministically derives an independent random source for
 // the given (epoch, worker) pair from masterSeed, using a pure function
 // of its inputs rather than sequential draws from a shared generator.
 // That independence is what makes concurrent rollout collection both
@@ -25,7 +25,12 @@ func splitmix64(x uint64) uint64 {
 // This replaces the original C program's randomness setup, which mixed a
 // global PCG stream (prng.c) with a separate, unseeded libc RNG
 // (arc4random_uniform) for food placement — see docs/05-porting-notes.md.
-func workerRNG(masterSeed uint64, epoch, worker int) *rand.Rand {
+//
+// Exported (rather than kept private to this package) so pkg/ppo's
+// trainer can derive its own reproducible per-worker and per-shuffle
+// streams from the same well-tested seed-mixing scheme instead of
+// duplicating it.
+func WorkerRNG(masterSeed uint64, epoch, worker int) *rand.Rand {
 	base := masterSeed ^ uint64(epoch)<<32 ^ uint64(uint32(worker))
 	seed1 := splitmix64(base)
 	seed2 := splitmix64(base ^ 0xD1B54A32D192ED03)

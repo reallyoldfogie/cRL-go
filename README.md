@@ -6,7 +6,7 @@ A Go reimplementation based on [`harshbhatt7585/cRL`](https://github.com/harshbh
 - A small dense matrix library (`pkg/mat`) with the matrix ops, activations, REINFORCE loss/gradients, and general-purpose elementwise ops (multiply, min, negate, exp, log) for composing policy-gradient objectives beyond REINFORCE.
 - A 3-layer MLP policy network (`pkg/policy`) with Xavier/Glorot initialization, and JSON checkpoint save/load so training can resume across sessions.
 - An actor-critic MLP (`pkg/actorcritic`), a separate network with the same shared trunk plus a scalar value head alongside the policy head, laying the groundwork for PPO-style training without changing `pkg/policy`'s REINFORCE-only shape. Its checkpoints (and, as of this port, `pkg/policy`'s) carry a schema version and an environment identifier, so a checkpoint can't be silently restored into an incompatible environment.
-- A PPO objective (`pkg/ppo`) built on top of `pkg/actorcritic`: Generalized Advantage Estimation (GAE(λ)), rollout collection that also captures each step's action log-probability and value estimate, and the clipped-surrogate policy loss plus a value loss and an entropy bonus, composed from `pkg/autograd`'s ops into a single trainable objective. A full minibatch trainer (Adam, multiple epochs per batch) is not yet wired up.
+- A PPO trainer (`pkg/ppo`) built on top of `pkg/actorcritic`: Generalized Advantage Estimation (GAE(λ)), rollout collection that also captures each step's action log-probability and value estimate, the clipped-surrogate policy loss plus a value loss and an entropy bonus, and an Adam optimizer (`actorcritic.Adam`) driving `PPOEpochs` shuffled-minibatch updates per collected batch — the `cmd/train-ppo` counterpart to `cmd/train`'s REINFORCE trainer.
 - An environment-agnostic training core (`pkg/rl`) with two example environments: a grid-foraging environment (`pkg/snakeenv`) and a goal-seeking gridworld (`pkg/gridworldenv`).
 - A REINFORCE trainer (`pkg/reinforce`) with concurrent rollout collection.
 - Config-file + CLI-flag support for hyperparameters (`pkg/config`, `configs/config.json`).
@@ -63,3 +63,13 @@ go test ./...          # full suite, including a slower training-trend test
 go test -short ./...   # skip the slower training-trend test
 go test -race ./...    # validate the concurrent rollout-collection path
 ```
+
+## PPO quickstart
+
+`cmd/train-ppo` trains the actor-critic network (`pkg/actorcritic`) with PPO (`pkg/ppo`) instead of REINFORCE, sharing `cmd/train`'s config file, CLI flags, `-env` choice, and `-checkpoint-in`/`-checkpoint-out` conventions, plus its own PPO-specific flags:
+
+```sh
+go run ./cmd/train-ppo -epochs=500 -clip-eps=0.2 -entropy-coef=0.01 -value-coef=0.5 -gae-lambda=0.95 -ppo-epochs=4 -minibatch-size=64
+```
+
+Run `go run ./cmd/train-ppo -h` for the full list of flags. `pkg/policy`/`pkg/reinforce` (REINFORCE) and `pkg/actorcritic`/`pkg/ppo` (PPO) are independent end to end: separate network types, separate checkpoint formats, and separate `cmd/` binaries, sharing only `pkg/config`'s settings and a handful of algorithm-agnostic helpers (`reinforce.EnvFactory`, `reinforce.SampleAction`, `reinforce.WorkerRNG`).
