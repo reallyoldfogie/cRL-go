@@ -1,5 +1,7 @@
 package autograd
 
+import "github.com/reallyoldfogie/cRL-go/pkg/mat"
+
 // sameShape is the Shape implementation shared by ops whose output shape
 // equals every input's shape (Add, Sub, ReinforceLoss).
 func sameShape(inputs ...*Var) (rows, cols int, ok bool) {
@@ -142,6 +144,26 @@ func (minOp) Backward(v *Var) {
 	}
 	if requiresGrad(b) {
 		_ = b.Grad.MinAddGrad(a.Val, b.Val, v.Grad, false)
+	}
+}
+
+// maxOp is elementwise maximum.
+type maxOp struct{}
+
+func (maxOp) NumInputs() int                        { return 2 }
+func (maxOp) Shape(inputs ...*Var) (int, int, bool) { return sameShape(inputs...) }
+
+func (maxOp) Forward(v *Var) {
+	_ = v.Val.Max(v.Inputs[0].Val, v.Inputs[1].Val)
+}
+
+func (maxOp) Backward(v *Var) {
+	a, b := v.Inputs[0], v.Inputs[1]
+	if requiresGrad(a) {
+		_ = a.Grad.MaxAddGrad(a.Val, b.Val, v.Grad, true)
+	}
+	if requiresGrad(b) {
+		_ = b.Grad.MaxAddGrad(a.Val, b.Val, v.Grad, false)
 	}
 }
 
@@ -294,6 +316,29 @@ func Mul(a, b *Var) (*Var, error) {
 // Min returns a new Var computing elementwise min(a, b).
 func Min(a, b *Var) (*Var, error) {
 	return newNode(minOp{}, a, b)
+}
+
+// Max returns a new Var computing elementwise max(a, b).
+func Max(a, b *Var) (*Var, error) {
+	return newNode(maxOp{}, a, b)
+}
+
+// Clamp returns a new Var computing elementwise min(max(x, lo), hi),
+// commonly used to bound a value (e.g. a PPO probability ratio) into a
+// fixed range. lo and hi are baked into constant Vars matching x's
+// shape, built once at the point Clamp is called, so they don't need to
+// be reconstructed on every Forward call.
+func Clamp(x *Var, lo, hi float32) (*Var, error) {
+	loMat := mat.New(x.Val.Rows, x.Val.Cols)
+	loMat.Fill(lo)
+	hiMat := mat.New(x.Val.Rows, x.Val.Cols)
+	hiMat.Fill(hi)
+
+	clampedLow, err := Max(x, Constant(loMat))
+	if err != nil {
+		return nil, err
+	}
+	return Min(clampedLow, Constant(hiMat))
 }
 
 // Neg returns a new Var computing elementwise -input.

@@ -264,6 +264,62 @@ func TestGradientCheckMin(t *testing.T) {
 	assertMatricesClose(t, b.Grad, numericalGradient(b, out, graph.Forward), gradCheckTolerance)
 }
 
+func TestGradientCheckMax(t *testing.T) {
+	// Fixed, comfortably-distinct values at every position, for the same
+	// tie-instability reason TestGradientCheckMin avoids randomly
+	// generated inputs.
+	a := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 3, Cols: 1, Data: []float32{-1.0, 0.5, 2.0}}}
+	a.Grad = mat.New(3, 1)
+	b := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 3, Cols: 1, Data: []float32{1.0, -0.5, 0.1}}}
+	b.Grad = mat.New(3, 1)
+
+	out, err := Max(a, b)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, a.Grad, numericalGradient(a, out, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, b.Grad, numericalGradient(b, out, graph.Forward), gradCheckTolerance)
+}
+
+func TestGradientCheckClamp(t *testing.T) {
+	// Values both inside and outside [lo, hi], each comfortably clear of
+	// the boundary itself (clamp's kinks at lo/hi are as unstable to
+	// gradient-check as ReLU's kink at zero).
+	x := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 4, Cols: 1, Data: []float32{-2.0, 0.0, 0.5, 3.0}}}
+	x.Grad = mat.New(4, 1)
+
+	out, err := Clamp(x, -1.0, 1.0)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, x.Grad, numericalGradient(x, out, graph.Forward), gradCheckTolerance)
+}
+
+// TestClampBoundsValuesOutsideRange confirms Clamp's forward pass
+// actually clips out-of-range values rather than passing them through,
+// which is the property the PPO clipped-surrogate objective
+// (docs/plans/03-gae-and-ppo-objective.md) depends on: a probability
+// ratio pushed far outside [1-ε, 1+ε] must be capped at the boundary,
+// not left at its raw (unclamped) value.
+func TestClampBoundsValuesOutsideRange(t *testing.T) {
+	x := NewVar(5, 1, FlagNone)
+	x.Val.Data = []float32{-10, -1, 0, 1, 10}
+
+	out, err := Clamp(x, -1, 1)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+
+	assert.Equal(t, []float32{-1, -1, 0, 1, 1}, out.Val.Data)
+}
+
 // TestGradientCheckExpOfSubComposition composes Sub and Exp the same way
 // a PPO probability ratio would (exp(logNew - logOld)), confirming the
 // two new ops chain correctly rather than only working in isolation.

@@ -133,6 +133,21 @@ func (dst *Matrix) Min(a, b *Matrix) error {
 	return nil
 }
 
+// Max computes dst = max(a, b) elementwise.
+func (dst *Matrix) Max(a, b *Matrix) error {
+	if err := checkSameShape(a, b); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, a); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		dst.Data[i] = max(a.Data[i], b.Data[i])
+	}
+	return nil
+}
+
 // Neg computes dst = -in elementwise.
 func (dst *Matrix) Neg(in *Matrix) error {
 	if err := checkSameShape(dst, in); err != nil {
@@ -425,6 +440,30 @@ func (dst *Matrix) MinAddGrad(a, b, grad *Matrix, dstIsA bool) error {
 	for i := range dst.Data {
 		aIsSmallerOrTied := a.Data[i] <= b.Data[i]
 		if aIsSmallerOrTied == dstIsA {
+			dst.Data[i] += grad.Data[i]
+		}
+	}
+	return nil
+}
+
+// MaxAddGrad accumulates the gradient of elementwise Max(a, b) into dst,
+// mirroring MinAddGrad exactly but for the larger of the two inputs:
+// dst[i] += grad[i] wherever the input dst belongs to is the larger of
+// the two at that position, with ties routed to a only.
+func (dst *Matrix) MaxAddGrad(a, b, grad *Matrix, dstIsA bool) error {
+	if err := checkSameShape(a, b); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, a); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i := range dst.Data {
+		aIsLargerOrTied := a.Data[i] >= b.Data[i]
+		if aIsLargerOrTied == dstIsA {
 			dst.Data[i] += grad.Data[i]
 		}
 	}

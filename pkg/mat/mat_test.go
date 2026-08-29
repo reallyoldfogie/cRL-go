@@ -178,6 +178,15 @@ func TestMinComputesElementwiseMinimum(t *testing.T) {
 	assert.Equal(t, []float32{1, 2, -2}, out.Data)
 }
 
+func TestMaxComputesElementwiseMaximum(t *testing.T) {
+	a := &Matrix{Rows: 1, Cols: 3, Data: []float32{1, 5, -2}}
+	b := &Matrix{Rows: 1, Cols: 3, Data: []float32{3, 2, -2}}
+	out := New(1, 3)
+
+	require.NoError(t, out.Max(a, b))
+	assert.Equal(t, []float32{3, 5, -2}, out.Data)
+}
+
 func TestNegNegatesElementwise(t *testing.T) {
 	in := &Matrix{Rows: 1, Cols: 3, Data: []float32{1, -2, 0}}
 	out := New(1, 3)
@@ -267,6 +276,24 @@ func TestMinAddGradRoutesToSmallerInputAndTiesToA(t *testing.T) {
 	dstB := New(1, 2)
 	require.NoError(t, dstB.MinAddGrad(a, b, grad, false))
 	// position 0: a < b, so b receives nothing. position 1: a tie, which
+	// is routed to a, so b also receives nothing.
+	assert.Equal(t, []float32{0, 0}, dstB.Data)
+}
+
+func TestMaxAddGradRoutesToLargerInputAndTiesToA(t *testing.T) {
+	a := &Matrix{Rows: 1, Cols: 2, Data: []float32{2, 2}}
+	b := &Matrix{Rows: 1, Cols: 2, Data: []float32{1, 2}} // position 1 is a tie
+	grad := &Matrix{Rows: 1, Cols: 2, Data: []float32{5, 5}}
+
+	dstA := New(1, 2)
+	require.NoError(t, dstA.MaxAddGrad(a, b, grad, true))
+	// position 0: a > b, so a receives the gradient. position 1: a tie,
+	// which is routed to a by convention.
+	assert.Equal(t, []float32{5, 5}, dstA.Data)
+
+	dstB := New(1, 2)
+	require.NoError(t, dstB.MaxAddGrad(a, b, grad, false))
+	// position 0: a > b, so b receives nothing. position 1: a tie, which
 	// is routed to a, so b also receives nothing.
 	assert.Equal(t, []float32{0, 0}, dstB.Data)
 }

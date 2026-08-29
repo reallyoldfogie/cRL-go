@@ -174,6 +174,15 @@ func NewTrainingNetwork(params *Params) (*TrainingNetwork, error) {
 	}, nil
 }
 
+// Parameters returns every one of the network's eight trainable weight
+// and bias Vars (the same set ZeroGrad and ApplyGradientStep iterate
+// internally), so external callers — gradient-checking a loss built on
+// top of this network (see pkg/ppo), or a future per-parameter optimizer
+// — can access them without reaching into unexported fields.
+func (n *TrainingNetwork) Parameters() []*autograd.Var {
+	return n.params.all()
+}
+
 // ZeroGrad clears every parameter's accumulated gradient. Call this once
 // per training batch, after applying the previous batch's gradient step.
 func (n *TrainingNetwork) ZeroGrad() {
