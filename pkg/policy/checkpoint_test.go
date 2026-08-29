@@ -17,9 +17,9 @@ func TestSaveLoadRoundTripPreservesWeights(t *testing.T) {
 	original := NewParams(rng, 12, 8, 5)
 
 	var buf bytes.Buffer
-	require.NoError(t, original.Save(&buf))
+	require.NoError(t, original.Save(&buf, "snake:36"))
 
-	loaded, err := Load(&buf)
+	loaded, err := Load(&buf, "snake:36")
 	require.NoError(t, err)
 
 	assert.Equal(t, original.InputSize(), loaded.InputSize())
@@ -38,21 +38,21 @@ func TestSaveFileLoadFileRoundTrip(t *testing.T) {
 	original := NewParams(rng, 6, 4, 3)
 
 	path := filepath.Join(t.TempDir(), "checkpoint.json")
-	require.NoError(t, SaveFile(path, original))
+	require.NoError(t, SaveFile(path, original, "gridworld:36"))
 
-	loaded, err := LoadFile(path)
+	loaded, err := LoadFile(path, "gridworld:36")
 	require.NoError(t, err)
 	assert.Equal(t, original.W0.Data, loaded.W0.Data)
 	assert.Equal(t, original.W2.Data, loaded.W2.Data)
 }
 
 func TestLoadFileRejectsMissingFile(t *testing.T) {
-	_, err := LoadFile(filepath.Join(t.TempDir(), "does-not-exist.json"))
+	_, err := LoadFile(filepath.Join(t.TempDir(), "does-not-exist.json"), "snake:36")
 	assert.Error(t, err)
 }
 
 func TestLoadRejectsInvalidJSON(t *testing.T) {
-	_, err := Load(strings.NewReader("not json"))
+	_, err := Load(strings.NewReader("not json"), "snake:36")
 	assert.Error(t, err)
 }
 
@@ -61,7 +61,7 @@ func TestLoadRejectsSizeMismatchedData(t *testing.T) {
 	// W0 values must be rejected rather than silently truncated or
 	// zero-padded.
 	corrupt := `{"input_size":12,"hidden_size":8,"output_size":5,"w0":[1,2,3],"b0":[],"w1":[],"b1":[],"w2":[],"b2":[]}`
-	_, err := Load(strings.NewReader(corrupt))
+	_, err := Load(strings.NewReader(corrupt), "snake:12")
 	assert.Error(t, err)
 }
 
@@ -69,6 +69,39 @@ func TestSaveFileRejectsUnwritableDirectory(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 6))
 	params := NewParams(rng, 4, 4, 2)
 
-	err := SaveFile(filepath.Join(string(os.PathSeparator), "does-not-exist-dir", "checkpoint.json"), params)
+	err := SaveFile(filepath.Join(string(os.PathSeparator), "does-not-exist-dir", "checkpoint.json"), params, "snake:4")
 	assert.Error(t, err)
+}
+
+func TestLoadRejectsMismatchedEnvironmentID(t *testing.T) {
+	rng := rand.New(rand.NewPCG(13, 17))
+	original := NewParams(rng, 6, 4, 3)
+
+	var buf bytes.Buffer
+	require.NoError(t, original.Save(&buf, "snake:36"))
+
+	_, err := Load(&buf, "gridworld:36")
+	assert.Error(t, err)
+}
+
+func TestLoadRejectsUnsupportedFutureSchemaVersion(t *testing.T) {
+	fromTheFuture := `{"schema_version":99,"environment_id":"snake:36","input_size":2,"hidden_size":2,"output_size":1,` +
+		`"w0":[0,0,0,0],"b0":[0,0],"w1":[0,0,0,0],"b1":[0,0],"w2":[0,0],"b2":[0]}`
+	_, err := Load(strings.NewReader(fromTheFuture), "snake:36")
+	assert.Error(t, err)
+}
+
+func TestLoadSkipsEnvironmentCheckForLegacyCheckpoint(t *testing.T) {
+	// A checkpoint saved before schema_version/environment_id existed
+	// has neither field in its JSON at all (as opposed to an empty
+	// string for environment_id, which is a checkpoint saved by *this*
+	// version of Save with an empty environmentID). It must still load
+	// successfully regardless of what environment the caller expects.
+	legacy := `{"input_size":2,"hidden_size":2,"output_size":1,"w0":[0,0,0,0],"b0":[0,0],"w1":[0,0,0,0],"b1":[0,0],"w2":[0,0],"b2":[0]}`
+
+	loaded, err := Load(strings.NewReader(legacy), "whatever-the-caller-expects")
+	require.NoError(t, err)
+	assert.Equal(t, 2, loaded.InputSize())
+	assert.Equal(t, 2, loaded.HiddenSize())
+	assert.Equal(t, 1, loaded.OutputSize())
 }

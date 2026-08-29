@@ -5,6 +5,7 @@ A Go reimplementation based on [`harshbhatt7585/cRL`](https://github.com/harshbh
 - A stdlib-only autograd engine (`pkg/autograd`), built around Go interfaces rather than the original's hand-rolled function-pointer vtable.
 - A small dense matrix library (`pkg/mat`) with the matrix ops, activations, REINFORCE loss/gradients, and general-purpose elementwise ops (multiply, min, negate, exp, log) for composing policy-gradient objectives beyond REINFORCE.
 - A 3-layer MLP policy network (`pkg/policy`) with Xavier/Glorot initialization, and JSON checkpoint save/load so training can resume across sessions.
+- An actor-critic MLP (`pkg/actorcritic`), a separate network with the same shared trunk plus a scalar value head alongside the policy head, laying the groundwork for PPO-style training without changing `pkg/policy`'s REINFORCE-only shape. Its checkpoints (and, as of this port, `pkg/policy`'s) carry a schema version and an environment identifier, so a checkpoint can't be silently restored into an incompatible environment.
 - An environment-agnostic training core (`pkg/rl`) with two example environments: a grid-foraging environment (`pkg/snakeenv`) and a goal-seeking gridworld (`pkg/gridworldenv`).
 - A REINFORCE trainer (`pkg/reinforce`) with concurrent rollout collection.
 - Config-file + CLI-flag support for hyperparameters (`pkg/config`, `configs/config.json`).
@@ -52,7 +53,7 @@ go run ./cmd/train -epochs=500 -checkpoint-out=checkpoints/policy.json
 go run ./cmd/train -epochs=500 -checkpoint-in=checkpoints/policy.json -checkpoint-out=checkpoints/policy.json
 ```
 
-A checkpoint records the policy's layer sizes alongside its weights, so loading one with a mismatched `-grid-size`/`-hidden-size` (or a different `-env`'s action/observation space) fails with a clear error instead of silently producing a broken network.
+A checkpoint records the policy's layer sizes alongside its weights, so loading one with a mismatched `-grid-size`/`-hidden-size` (or a different `-env`'s action/observation space) fails with a clear error instead of silently producing a broken network. It also records an environment identifier derived from `-env`/`-grid-size` (e.g. `snake:36`), so a checkpoint trained with one `-env`/`-grid-size` combination is rejected outright if loaded with a different one, even in the rare case where the raw layer sizes happen to coincide.
 
 ### Tests
 

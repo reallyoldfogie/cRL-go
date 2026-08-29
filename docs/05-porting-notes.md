@@ -51,6 +51,8 @@ The original's `model.c` hardcodes the policy network's input layer size to `76`
 
 The original's `create_actor_model` (`model.c`) name suggests an actor-critic architecture, but there is no critic (no second network predicting expected returns) anywhere in the algorithm — only a simple batch-wide mean/std baseline (see `03-policy-gradients-and-reinforce.md`). This port's `policy` package avoids "actor" terminology for this reason, to avoid implying a training approach that isn't actually implemented. The environment is still called `snakeenv` (matching the original's "Snake" framing) even though it has no snake body, tail, growth, or self-collision — only a single point-agent and boundary detection — this is called out explicitly in `pkg/snakeenv/action.go`'s package documentation and in `03-policy-gradients-and-reinforce.md` rather than silently renamed, since "Snake" is how the original project (and its README/training screenshot) describes it.
 
+This claim about `pkg/policy` remains true even though the module has since grown a real critic: `pkg/actorcritic` is a separate package (a shared trunk feeding both a softmax policy head and a scalar value head), added to support PPO-style training without changing `pkg/policy`'s shape or its REINFORCE-only meaning. `pkg/reinforce` still trains exclusively against `pkg/policy`.
+
 ## Validation approach
 
 This port does not attempt bit-for-bit numeric parity with the original C binary (the two implementations differ enough — a different random number generator, a restructured graph-building algorithm, a different concurrency model — that end-to-end parity was never realistically achievable, and it wasn't a goal). Instead, correctness is validated through:

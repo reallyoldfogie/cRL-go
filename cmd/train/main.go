@@ -53,7 +53,13 @@ func run(args []string) error {
 		return err
 	}
 
-	initialParams, err := loadInitialParams(*checkpointIn)
+	// environmentID identifies the environment/action-space a checkpoint
+	// was trained against (e.g. "snake:36"), so a checkpoint saved for
+	// one -env/-grid-size combination can't be silently loaded into an
+	// incompatible one (see policy.Load).
+	environmentID := fmt.Sprintf("%s:%d", *envName, settings.GridSize)
+
+	initialParams, err := loadInitialParams(*checkpointIn, environmentID)
 	if err != nil {
 		return err
 	}
@@ -76,7 +82,7 @@ func run(args []string) error {
 	}
 
 	if *checkpointOut != "" {
-		if err := policy.SaveFile(*checkpointOut, trainer.Params()); err != nil {
+		if err := policy.SaveFile(*checkpointOut, trainer.Params(), environmentID); err != nil {
 			return fmt.Errorf("saving checkpoint: %w", err)
 		}
 	}
@@ -85,13 +91,14 @@ func run(args []string) error {
 
 // loadInitialParams loads the checkpoint at checkpointPath if one was
 // given, returning nil (meaning "initialize fresh") if checkpointPath is
-// empty.
-func loadInitialParams(checkpointPath string) (*policy.Params, error) {
+// empty. expectedEnvironmentID is validated against the checkpoint's own
+// saved environment ID (see policy.Load).
+func loadInitialParams(checkpointPath, expectedEnvironmentID string) (*policy.Params, error) {
 	if checkpointPath == "" {
 		return nil, nil
 	}
 
-	params, err := policy.LoadFile(checkpointPath)
+	params, err := policy.LoadFile(checkpointPath, expectedEnvironmentID)
 	if err != nil {
 		return nil, fmt.Errorf("loading checkpoint: %w", err)
 	}

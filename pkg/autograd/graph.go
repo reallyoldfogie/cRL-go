@@ -18,6 +18,25 @@ type Graph struct {
 // O(n^2) removal step to re-order already-queued nodes; that quadratic
 // behavior isn't reproduced here. See docs/05-porting-notes.md.
 func BuildGraph(output *Var) *Graph {
+	return BuildGraphMulti(output)
+}
+
+// BuildGraphMulti is BuildGraph generalized to more than one root: it
+// traverses every Var reachable from any of roots and returns a single
+// Graph containing the union, still in a valid topological order (every
+// Var's inputs appear before it), with any Vars shared between roots'
+// dependency trees (e.g. a shared hidden trunk feeding two independent
+// output heads) visited and included only once. This lets a single
+// Graph.Forward call compute several otherwise-unrelated outputs (e.g.
+// an actor-critic network's separate policy and value heads) in one
+// pass, without requiring them to be combined into a single Var first.
+//
+// Graph.Backward's single-root seeding (see its doc comment) assumes the
+// *last* Var in topological order is the thing being differentiated;
+// BuildGraphMulti doesn't change that assumption, so a graph built with
+// more than one root should generally only be used for Forward (as
+// InferenceNetwork does) rather than Backward.
+func BuildGraphMulti(roots ...*Var) *Graph {
 	visited := make(map[*Var]bool)
 	var order []*Var
 
@@ -33,7 +52,9 @@ func BuildGraph(output *Var) *Graph {
 		}
 		order = append(order, v)
 	}
-	visit(output)
+	for _, root := range roots {
+		visit(root)
+	}
 
 	return &Graph{Vars: order}
 }
