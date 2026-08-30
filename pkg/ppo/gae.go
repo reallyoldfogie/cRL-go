@@ -22,7 +22,7 @@ type Rollout struct {
 	Values   []float32
 }
 
-// computeGAE computes Generalized Advantage Estimation (GAE(λ))
+// ComputeGAE computes Generalized Advantage Estimation (GAE(λ))
 // advantages and value-target returns for every step of rollout, using
 // the standard recurrence computed backward through the trajectory:
 //
@@ -37,7 +37,12 @@ type Rollout struct {
 // computeReturns already implements (a well-known identity for GAE),
 // which TestComputeGAEWithNoDiscountingReducesToPlainReturns checks
 // directly.
-func computeGAE(rollout *Rollout, gamma, lambda float32) (advantages, returns []float32) {
+//
+// Exported (rather than kept private to this package) so
+// pkg/hierarchical can compute GAE for both its meta-controller's and
+// each sub-policy's independent rollout streams without duplicating
+// this recurrence — see docs/plans/11-hierarchical-meta-controller-and-subpolicies.md.
+func ComputeGAE(rollout *Rollout, gamma, lambda float32) (advantages, returns []float32) {
 	stepCount := len(rollout.Episode.Transitions)
 	advantages = make([]float32, stepCount)
 	returns = make([]float32, stepCount)

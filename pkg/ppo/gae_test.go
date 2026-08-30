@@ -9,7 +9,7 @@ import (
 
 // rolloutFromRewardsAndValues builds a Rollout whose rewards and value
 // estimates are the given fixtures, ignoring every other rl.Transition
-// field (computeGAE only reads Reward and the parallel Values slice).
+// field (ComputeGAE only reads Reward and the parallel Values slice).
 func rolloutFromRewardsAndValues(rewards, values []float32) *Rollout {
 	transitions := make([]rl.Transition, len(rewards))
 	for i, reward := range rewards {
@@ -28,7 +28,7 @@ func rolloutFromRewardsAndValues(rewards, values []float32) *Rollout {
 func TestComputeGAEWithNoDiscountingReducesToPlainReturns(t *testing.T) {
 	rollout := rolloutFromRewardsAndValues([]float32{1, 1}, []float32{0, 0})
 
-	advantages, returns := computeGAE(rollout, 1.0, 1.0)
+	advantages, returns := ComputeGAE(rollout, 1.0, 1.0)
 
 	assert.Equal(t, []float32{2, 1}, advantages)
 	assert.Equal(t, []float32{2, 1}, returns)
@@ -55,7 +55,7 @@ func TestComputeGAEWithNoDiscountingReducesToPlainReturns(t *testing.T) {
 func TestComputeGAEWithDiscountingAndValues(t *testing.T) {
 	rollout := rolloutFromRewardsAndValues([]float32{1, 1, 1}, []float32{0.5, 0.5, 0.5})
 
-	advantages, returns := computeGAE(rollout, 0.9, 0.95)
+	advantages, returns := ComputeGAE(rollout, 0.9, 0.95)
 
 	checks := assert.New(t)
 	checks.InDelta(2.1277625, advantages[0], 1e-4)
@@ -70,7 +70,7 @@ func TestComputeGAEWithDiscountingAndValues(t *testing.T) {
 func TestComputeGAEHandlesSingleStepEpisode(t *testing.T) {
 	rollout := rolloutFromRewardsAndValues([]float32{3}, []float32{1})
 
-	advantages, returns := computeGAE(rollout, 0.99, 0.95)
+	advantages, returns := ComputeGAE(rollout, 0.99, 0.95)
 
 	// A single step has no next value to bootstrap from, so
 	// advantage[0] = reward - value = 3 - 1 = 2, and return[0] =

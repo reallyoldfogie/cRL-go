@@ -202,7 +202,7 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 
 	scored := make([]scoredRollout, len(rollouts))
 	for i, rollout := range rollouts {
-		advantages, returns := computeGAE(rollout, tr.settings.Gamma, tr.settings.GAELambda)
+		advantages, returns := ComputeGAE(rollout, tr.settings.Gamma, tr.settings.GAELambda)
 		scored[i] = scoredRollout{Rollout: rollout, Advantages: advantages, Returns: returns}
 	}
 
