@@ -17,6 +17,15 @@ See `docs/` for a from-first-principles explanation of the machine learning conc
 
 The algorithm, initial environment design, and overall program structure were derived from [`github.com/harshbhatt7585/cRL`](https://github.com/harshbhatt7585/cRL).
 
+## Versioning
+
+This module is tagged with standard Go semantic-versioning git tags (`vMAJOR.MINOR.PATCH` on `main`), currently pre-1.0 (`v0.x.y`) while the exported surface (`pkg/rl`, `pkg/reinforce`, `pkg/ppo`, `pkg/policy`, `pkg/actorcritic`, `pkg/config`) is still evolving. Pre-1.0:
+
+- Any change to an exported API in those packages — including a breaking one — bumps `MINOR`. Go's module rules allow a `v0.x` `MINOR` bump to carry breaking changes, which fits this project's current rate of change better than committing to `v1` stability now.
+- Internal-only changes (implementation details, tests, docs) bump `PATCH`.
+
+`pkg/rl`'s interfaces (`Environment`, `Observation`, `Action`) are the surface external consumers depend on most directly, so a tag whose message doesn't call out a change there risks silently breaking a downstream build. Release notes live in each annotated tag's own message (`git tag -a vX.Y.Z -m "..."`) rather than a separate changelog file.
+
 ## Quickstart
 
 Build and run from the module root:
