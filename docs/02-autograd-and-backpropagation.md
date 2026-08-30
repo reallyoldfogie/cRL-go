@@ -20,12 +20,16 @@ This is powerful because it means we never need to differentiate the whole netwo
 
 ## Computational graphs
 
-`pkg/autograd` represents the network as a **computational graph**: a directed graph of `Var` nodes (see `pkg/autograd/var.go`), where each non-leaf `Var` was computed by applying some `Op` (ReLU, Softmax, Add, Sub, Mul, Min, Neg, Exp, Log, MatMul, or the REINFORCE loss — see `pkg/autograd/ops.go`) to one or two other `Var`s.
+`pkg/autograd` represents the network as a **computational graph**: a directed graph of `Var` nodes (see `pkg/autograd/var.go`), where each non-leaf `Var` was computed by applying some `Op` (ReLU, Softmax, Add, Sub, Mul, Min, Max, Clamp, Neg, Exp, Log, MatMul, or the REINFORCE loss — see `pkg/autograd/ops.go`) to one or two other `Var`s.
 
 - **Leaf** `Var`s have no `Op` — they're either network inputs (the state vector) or a network's raw parameters (weights/biases).
 - Every other `Var` was computed by some `Op` from its `Inputs`.
 
 `BuildGraph` (in `pkg/autograd/graph.go`) walks this graph starting from some final `Var` (e.g. the loss) and produces a list of every reachable `Var`, ordered so that every `Var`'s inputs appear *before* it in the list — a **topological order**. This ordering is what makes both passes below possible with a single, simple left-to-right (or right-to-left) walk.
+
+### Graphs with more than one output
+
+Some networks need to compute more than one final value from a single forward pass — for example, an actor-critic network (see `07-actor-critic-and-generalized-advantage-estimation.md`) produces both an action distribution *and* a value estimate from the same shared trunk. `BuildGraphMulti` generalizes `BuildGraph` to accept several root `Var`s at once (`BuildGraph` is now just `BuildGraphMulti` called with one root): it still produces a single, valid topological order, and any `Var`s the roots happen to share (like that common trunk) are visited and included only once rather than being computed twice. This only supports `Forward` (computing values), not `Backward`, for the same reason `Backward` only ever differentiates a single scalar quantity: `pkg/actorcritic.InferenceNetwork` (forward-only) uses `BuildGraphMulti`, while an actual training loss (which does need `Backward`) is always built as one combined `Var` first.
 
 ## The forward pass: computing values
 
@@ -58,7 +62,7 @@ You don't need to re-derive this to use it — the point of `pkg/autograd` is th
 
 ## Elementwise ops beyond REINFORCE
 
-Add, Sub, Mul, Min, Neg, Exp, and Log are all elementwise: each output element depends only on the corresponding input element(s), which is what keeps their `Backward` rules simple compared to softmax's (no cross-element interaction). Mul, Min, Neg, Exp, and Log exist specifically so that objectives more complex than REINFORCE's `-log(p) * advantage` can be composed from existing graph nodes rather than requiring a new hand-written `Op` per objective — for example, a clipped probability-ratio objective needs `exp(logNew - logOld)` and a `min(...)` between two candidate surrogate values, both expressible with these primitives. `TestGradientCheckExpOfSubComposition` in `pkg/autograd/gradcheck_test.go` demonstrates exactly this kind of composition (`Exp` of a `Sub`).
+Add, Sub, Mul, Min, Max, Neg, Exp, and Log are all elementwise: each output element depends only on the corresponding input element(s), which is what keeps their `Backward` rules simple compared to softmax's (no cross-element interaction). Mul, Min, Max, Neg, Exp, and Log exist specifically so that objectives more complex than REINFORCE's `-log(p) * advantage` can be composed from existing graph nodes rather than requiring a new hand-written `Op` per objective — for example, a clipped probability-ratio objective needs `exp(logNew - logOld)` and a `min(...)` between two candidate surrogate values, both expressible with these primitives (`Clamp`, used by that same objective to bound the ratio into a fixed range, is a small helper built from `Max` and `Min` rather than a further `Op` of its own — see `pkg/autograd/ops.go`). `TestGradientCheckExpOfSubComposition` in `pkg/autograd/gradcheck_test.go` demonstrates exactly this kind of composition (`Exp` of a `Sub`).
 
 ## Validating this actually works: gradient checking
 
@@ -72,4 +76,4 @@ This "numerical gradient" is slow (it requires re-running the entire forward pas
 
 ## Where to go next
 
-`03-policy-gradients-and-reinforce.md` explains what loss this project actually computes and why — the REINFORCE algorithm — and how gradients flowing back through this graph translate into "make the policy more likely to repeat good decisions."
+`03-policy-gradients-and-reinforce.md` explains what loss this project actually computes and why — the REINFORCE algorithm — and how gradients flowing back through this graph translate into "make the policy more likely to repeat good decisions." `07-actor-critic-and-generalized-advantage-estimation.md` and `08-ppo-clipped-objective.md` explain a more elaborate loss, built from several of these same primitives (`Min`, `Max`, `Clamp`, `Exp`, `Log`), composed together on top of a `BuildGraphMulti` network.

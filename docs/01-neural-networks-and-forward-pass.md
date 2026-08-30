@@ -76,3 +76,4 @@ Biases start at exactly zero — there's no symmetry-breaking concern for biases
 
 - `02-autograd-and-backpropagation.md` explains how the network's parameters actually get updated: computing gradients via automatic differentiation.
 - `03-policy-gradients-and-reinforce.md` explains what this particular network is being trained *to do* (choose good actions) and the algorithm used to train it.
+- `07-actor-critic-and-generalized-advantage-estimation.md` explains `pkg/actorcritic`, which reuses this exact shared-trunk architecture but adds a second linear output head predicting expected return alongside the action distribution.

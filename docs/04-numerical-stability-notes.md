@@ -58,3 +58,17 @@ This preserves the original algorithm's behavior for the (overwhelmingly common)
 Every numeric type in `pkg/mat` is `float32`, matching the original C implementation's `f32` (`float`) throughout. Go and C both implement IEEE 754 binary32 arithmetic, so a given sequence of `float32` operations produces bit-for-bit identical results in both languages *if* the exact same operations are performed in the exact same order. This port deliberately preserves the original operation order in every numerically meaningful spot (softmax, the REINFORCE loss/gradient, the matmul accumulation order) for this reason, even though exact byte-for-byte parity with the C binary was explicitly not a goal of this port (see `05-porting-notes.md`) — the two implementations are structured differently enough (e.g. a different random number generator, a restructured graph-building algorithm) that bit-for-bit parity was never realistically achievable end-to-end, but preserving float32 arithmetic and operation order keeps this port numerically faithful in spirit.
 
 One departure: `math.Exp`/`math.Log` in Go's standard library operate on `float64`, so `pkg/mat` converts to `float64`, calls the standard library function, and converts back to `float32` (Go's standard library has no built-in `float32` exp/log). This is, if anything, slightly *more* precise per individual call than C's native `expf`/`logf` (which compute directly in lower precision), not less.
+
+## Adam's division-by-near-zero guard
+
+`Adam.Step` (`pkg/actorcritic/adam.go`, see `09-adam-optimizer-and-minibatch-training.md` for what this optimizer does and why) computes, for every parameter:
+
+```go
+p.Val.Data[j] -= a.learningRate * moment1Hat / (float32(math.Sqrt(float64(moment2Hat))) + epsilon)
+```
+
+`moment2Hat` is a bias-corrected estimate of that parameter's recent squared gradient magnitude, which starts at zero and can legitimately stay very close to zero for a parameter whose gradient has been consistently tiny (or exactly zero, e.g. early in training before a particular part of the network has been exercised by any data). Dividing by `sqrt(moment2Hat)` directly would then divide by (near) zero, producing an enormous or `Inf`/`NaN` step for exactly the parameter that most needs a *small*, cautious update. `epsilon` (`adamEpsilon`, `1e-8`) is added to the denominator specifically to prevent this: it's negligible whenever `sqrt(moment2Hat)` is already a reasonable size, but puts a firm floor under the denominator when it isn't, capping how large a single Adam step can ever be for a parameter with little gradient history yet.
+
+## Where to go next
+
+`09-adam-optimizer-and-minibatch-training.md` explains what the Adam optimizer above is actually computing and why, beyond just the numerical guard covered here.

@@ -1,5 +1,7 @@
 # Checkpoints and auto-resume
 
+This doc assumes you already know what "PPO" and "actor-critic" mean; if not, `07-actor-critic-and-generalized-advantage-estimation.md` through `09-adam-optimizer-and-minibatch-training.md` explain the algorithm behind `cmd/train-ppo` and its checkpoint format from first principles. This doc itself is purely a practical, workflow-level explanation of saving, resuming, and inspecting checkpoints, applicable to REINFORCE (`cmd/train`) and PPO (`cmd/train-ppo`) alike.
+
 Both training commands support two checkpoint workflows:
 
 - `-checkpoint-in`/`-checkpoint-out`: manually load or save one specific file.

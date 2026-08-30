@@ -75,3 +75,5 @@ Because REINFORCE's gradient estimate is noisy (it only ever sees a finite, samp
 ## Where to go next
 
 `04-numerical-stability-notes.md` covers the specific numerical safeguards (clamping, the softmax max-subtraction trick, the variance clamp) that keep this whole pipeline from producing `NaN`/`Inf` in practice.
+
+`07-actor-critic-and-generalized-advantage-estimation.md` picks up the batch-wide baseline idea from this doc and replaces it with a more sophisticated, learned alternative: a second network predicting expected return, combined with real rewards via Generalized Advantage Estimation. This is a genuinely different, more involved technique from the simple mean/std baseline above — the "This is not the same as actor-critic" distinction earlier in this doc still describes exactly what `pkg/reinforce` does today; `07` is where actor-critic is actually implemented, in a separate package.

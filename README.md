@@ -11,7 +11,7 @@ A Go reimplementation based on [`harshbhatt7585/cRL`](https://github.com/harshbh
 - A REINFORCE trainer (`pkg/reinforce`) with concurrent rollout collection.
 - Config-file + CLI-flag support for hyperparameters (`pkg/config`, `configs/config.json`).
 
-See `docs/` for a from-first-principles explanation of the machine learning concepts involved (neural networks, backpropagation, policy gradients, numerical stability), and `docs/05-porting-notes.md` for a detailed account of every deliberate difference from the original C implementation.
+See `docs/` for a from-first-principles explanation of the machine learning concepts involved: neural networks and backpropagation (`01`-`02`), REINFORCE and numerical stability (`03`-`04`), actor-critic networks, Generalized Advantage Estimation, PPO's clipped objective, and Adam/minibatch training (`07`-`09`), and live inference/action masking (`10`). `docs/05-porting-notes.md` covers every deliberate difference from the original C implementation, and `docs/06-checkpoints-and-auto-resume.md` covers the checkpoint save/resume/inspect workflow.
 
 ## Attribution
 
@@ -81,4 +81,4 @@ go test -race ./...    # validate the concurrent rollout-collection path
 go run ./cmd/train-ppo -epochs=500 -clip-eps=0.2 -entropy-coef=0.01 -value-coef=0.5 -gae-lambda=0.95 -ppo-epochs=4 -minibatch-size=64
 ```
 
-Run `go run ./cmd/train-ppo -h` for the full list of flags. `pkg/policy`/`pkg/reinforce` (REINFORCE) and `pkg/actorcritic`/`pkg/ppo` (PPO) are independent end to end: separate network types, separate checkpoint formats, and separate `cmd/` binaries, sharing only `pkg/config`'s settings and a handful of algorithm-agnostic helpers (`reinforce.EnvFactory`, `reinforce.SampleAction`, `reinforce.WorkerRNG`).
+Run `go run ./cmd/train-ppo -h` for the full list of flags. `pkg/policy`/`pkg/reinforce` (REINFORCE) and `pkg/actorcritic`/`pkg/ppo` (PPO) are independent end to end: separate network types, separate checkpoint formats, and separate `cmd/` binaries, sharing only `pkg/config`'s settings and a handful of algorithm-agnostic helpers (`reinforce.EnvFactory`, `reinforce.SampleAction`/`reinforce.SampleMaskedAction`, `reinforce.WorkerRNG`). Both network types also expose an `Actor` (`policy.Actor`, `actorcritic.Actor`) for making a single live decision outside of training — see `docs/10-live-inference-and-action-masking.md`.
