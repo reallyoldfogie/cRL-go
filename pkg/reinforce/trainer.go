@@ -16,6 +16,11 @@ type EpochStats struct {
 	AverageReturn float32
 	SampleCount   int
 	ReturnStd     float32
+	// UpdateCount is the number of gradient-update steps RunEpoch applied
+	// (always 1 for REINFORCE's one-SGD-step-per-epoch design), so a
+	// caller accumulating it across epochs can populate a
+	// checkpoint.Metadata.TotalUpdates.
+	UpdateCount int
 }
 
 // Trainer runs the REINFORCE training loop described in
@@ -152,6 +157,7 @@ func (tr *Trainer) RunEpoch(epoch int) (EpochStats, error) {
 		AverageReturn: returnSum / float32(len(scored)),
 		SampleCount:   sampleCount,
 		ReturnStd:     std,
+		UpdateCount:   1,
 	}, nil
 }
 

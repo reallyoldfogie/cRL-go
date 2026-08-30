@@ -56,6 +56,15 @@ go run ./cmd/train -epochs=500 -checkpoint-in=checkpoints/policy.json -checkpoin
 
 A checkpoint records the policy's layer sizes alongside its weights, so loading one with a mismatched `-grid-size`/`-hidden-size` (or a different `-env`'s action/observation space) fails with a clear error instead of silently producing a broken network. It also records an environment identifier derived from `-env`/`-grid-size` (e.g. `snake:36`), so a checkpoint trained with one `-env`/`-grid-size` combination is rejected outright if loaded with a different one, even in the rare case where the raw layer sizes happen to coincide.
 
+For periodic saves and automatic resume (including continued epoch/best-return/update counters), use `-checkpoint-dir` with `-checkpoint-interval`:
+
+```sh
+go run ./cmd/train -epochs=500 -checkpoint-dir=checkpoints/reinforce -checkpoint-interval=50
+go run ./cmd/train-ppo -epochs=500 -checkpoint-dir=checkpoints/ppo -checkpoint-interval=50
+```
+
+Inspect the resulting files with `go run ./cmd/checkpoint-tool list <dir>` or `info <checkpoint>`. See `docs/06-checkpoints-and-auto-resume.md` for the complete workflow and metadata format.
+
 ### Tests
 
 ```sh

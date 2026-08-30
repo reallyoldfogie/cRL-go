@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/reallyoldfogie/cRL-go/pkg/checkpoint"
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
 
@@ -22,11 +23,13 @@ const checkpointSchemaVersionCurrent CheckpointSchemaVersion = 1
 
 // checkpointData is the on-disk JSON representation of a Params: its
 // schema version, the environment/action-space identifier it was
-// trained against, its three layer sizes, plus the flattened weight/bias
-// data for every matrix (including the value head).
+// trained against, its run-progress Metadata, its three layer sizes,
+// plus the flattened weight/bias data for every matrix (including the
+// value head).
 type checkpointData struct {
 	SchemaVersion CheckpointSchemaVersion `json:"schema_version"`
 	EnvironmentID string                  `json:"environment_id"`
+	Metadata      checkpoint.Metadata     `json:"metadata"`
 
 	InputSize  int `json:"input_size"`
 	HiddenSize int `json:"hidden_size"`
@@ -43,12 +46,15 @@ type checkpointData struct {
 }
 
 // Save writes p's learned weights and biases to w as JSON, tagged with
-// environmentID (e.g. "snake:36"), so a future Load call can reject
-// restoring this checkpoint into an incompatible environment.
-func (p *Params) Save(w io.Writer, environmentID string) error {
+// environmentID (e.g. "snake:36") and metadata (epoch, best return,
+// total update count), so a future Load call can reject restoring this
+// checkpoint into an incompatible environment and a resuming trainer
+// can continue its counters from where this checkpoint left off.
+func (p *Params) Save(w io.Writer, environmentID string, metadata checkpoint.Metadata) error {
 	data := checkpointData{
 		SchemaVersion: checkpointSchemaVersionCurrent,
 		EnvironmentID: environmentID,
+		Metadata:      metadata,
 		InputSize:     p.InputSize(),
 		HiddenSize:    p.HiddenSize(),
 		OutputSize:    p.OutputSize(),
@@ -80,21 +86,22 @@ type checkpointField struct {
 // each matrix at the shape implied by the saved layer sizes and
 // rejecting the checkpoint if any saved matrix's data doesn't match that
 // shape (e.g. a truncated or hand-edited file), or if its EnvironmentID
-// doesn't match expectedEnvironmentID.
-func Load(r io.Reader, expectedEnvironmentID string) (*Params, error) {
+// doesn't match expectedEnvironmentID. The returned checkpoint.Metadata
+// is the checkpoint's saved run-progress information.
+func Load(r io.Reader, expectedEnvironmentID string) (*Params, checkpoint.Metadata, error) {
 	var data checkpointData
 	if err := json.NewDecoder(r).Decode(&data); err != nil {
-		return nil, fmt.Errorf("actorcritic: loading checkpoint: %w", err)
+		return nil, checkpoint.Metadata{}, fmt.Errorf("actorcritic: loading checkpoint: %w", err)
 	}
 	if data.SchemaVersion != checkpointSchemaVersionCurrent {
-		return nil, fmt.Errorf(
+		return nil, checkpoint.Metadata{}, fmt.Errorf(
 			"actorcritic: loading checkpoint: unsupported schema version %d",
 			data.SchemaVersion,
 		)
 	}
 
 	if data.EnvironmentID != expectedEnvironmentID {
-		return nil, fmt.Errorf(
+		return nil, checkpoint.Metadata{}, fmt.Errorf(
 			"actorcritic: loading checkpoint: saved for environment %q, want %q",
 			data.EnvironmentID, expectedEnvironmentID,
 		)
@@ -124,7 +131,7 @@ func Load(r io.Reader, expectedEnvironmentID string) (*Params, error) {
 	}
 	for _, field := range fields {
 		if len(field.src) != len(field.dst.Data) {
-			return nil, fmt.Errorf(
+			return nil, checkpoint.Metadata{}, fmt.Errorf(
 				"actorcritic: loading checkpoint: %s has %d values, want %d",
 				field.name, len(field.src), len(field.dst.Data),
 			)
@@ -132,18 +139,18 @@ func Load(r io.Reader, expectedEnvironmentID string) (*Params, error) {
 		copy(field.dst.Data, field.src)
 	}
 
-	return params, nil
+	return params, data.Metadata, nil
 }
 
 // SaveFile is a convenience wrapper around Save that writes to the file
 // at path, creating or truncating it as needed.
-func SaveFile(path string, p *Params, environmentID string) error {
+func SaveFile(path string, p *Params, environmentID string, metadata checkpoint.Metadata) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("actorcritic: saving checkpoint: %w", err)
 	}
 
-	if err := p.Save(file, environmentID); err != nil {
+	if err := p.Save(file, environmentID, metadata); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -156,10 +163,10 @@ func SaveFile(path string, p *Params, environmentID string) error {
 
 // LoadFile is a convenience wrapper around Load that reads from the file
 // at path.
-func LoadFile(path string, expectedEnvironmentID string) (*Params, error) {
+func LoadFile(path string, expectedEnvironmentID string) (*Params, checkpoint.Metadata, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("actorcritic: loading checkpoint: %w", err)
+		return nil, checkpoint.Metadata{}, fmt.Errorf("actorcritic: loading checkpoint: %w", err)
 	}
 	defer file.Close()
 

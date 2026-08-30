@@ -15,6 +15,7 @@ import (
 	"os"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
+	"github.com/reallyoldfogie/cRL-go/pkg/checkpoint"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
 	"github.com/reallyoldfogie/cRL-go/pkg/gridworldenv"
 	"github.com/reallyoldfogie/cRL-go/pkg/ppo"
@@ -35,6 +36,8 @@ func run(args []string) error {
 	envName := fs.String("env", "snake", "environment to train against: snake or gridworld")
 	checkpointIn := fs.String("checkpoint-in", "", "path to a checkpoint (see -checkpoint-out) to resume training from, instead of a fresh policy (optional)")
 	checkpointOut := fs.String("checkpoint-out", "", "path to save the trained actor-critic weights to after training completes (optional)")
+	checkpointDir := fs.String("checkpoint-dir", "", "directory to auto-resume the latest checkpoint from, and periodically save numbered checkpoints into (optional; independent of -checkpoint-in/-checkpoint-out)")
+	checkpointInterval := fs.Int("checkpoint-interval", 50, "save a checkpoint to -checkpoint-dir every N epochs (only used if -checkpoint-dir is set)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -60,9 +63,20 @@ func run(args []string) error {
 	// incompatible one (see actorcritic.Load).
 	environmentID := fmt.Sprintf("%s:%d", *envName, settings.GridSize)
 
-	initialParams, err := loadInitialParams(*checkpointIn, environmentID)
+	resume, err := resumeFromCheckpointDir(*checkpointDir, environmentID)
 	if err != nil {
 		return err
+	}
+
+	initialParams := resume.Params
+	if initialParams != nil && *checkpointIn != "" {
+		return fmt.Errorf("both -checkpoint-in and an existing checkpoint in -checkpoint-dir were found; use only one to resume from")
+	}
+	if initialParams == nil {
+		initialParams, err = loadInitialParams(*checkpointIn, environmentID)
+		if err != nil {
+			return err
+		}
 	}
 
 	trainer, err := ppo.New(settings, envFactory, initialParams)
@@ -70,20 +84,41 @@ func run(args []string) error {
 		return err
 	}
 
-	for epoch := range settings.Epochs {
+	bestReturn := resume.BestReturn
+	totalUpdates := resume.TotalUpdates
+
+	for epoch := resume.StartEpoch; epoch < settings.Epochs; epoch++ {
 		stats, err := trainer.RunEpoch(epoch)
 		if err != nil {
 			return err
+		}
+		totalUpdates += stats.UpdateCount
+		if stats.AverageReturn > bestReturn {
+			bestReturn = stats.AverageReturn
 		}
 
 		fmt.Printf(
 			"Epoch %d | Average return: %.3f | Samples: %d\n",
 			stats.Epoch, stats.AverageReturn, stats.SampleCount,
 		)
+
+		interval := *checkpointInterval
+		if *checkpointDir != "" && interval > 0 && (epoch+1)%interval == 0 {
+			if err := saveCheckpointToDir(*checkpointDir, trainer.Params(), environmentID, epoch, bestReturn, totalUpdates); err != nil {
+				return fmt.Errorf("saving periodic checkpoint: %w", err)
+			}
+		}
+	}
+
+	if *checkpointDir != "" && settings.Epochs > resume.StartEpoch {
+		if err := saveCheckpointToDir(*checkpointDir, trainer.Params(), environmentID, settings.Epochs-1, bestReturn, totalUpdates); err != nil {
+			return fmt.Errorf("saving final checkpoint: %w", err)
+		}
 	}
 
 	if *checkpointOut != "" {
-		if err := actorcritic.SaveFile(*checkpointOut, trainer.Params(), environmentID); err != nil {
+		metadata := checkpoint.Metadata{Epoch: settings.Epochs - 1, BestReturn: bestReturn, TotalUpdates: totalUpdates}
+		if err := actorcritic.SaveFile(*checkpointOut, trainer.Params(), environmentID, metadata); err != nil {
 			return fmt.Errorf("saving checkpoint: %w", err)
 		}
 	}
@@ -93,13 +128,16 @@ func run(args []string) error {
 // loadInitialParams loads the checkpoint at checkpointPath if one was
 // given, returning nil (meaning "initialize fresh") if checkpointPath is
 // empty. expectedEnvironmentID is validated against the checkpoint's own
-// saved environment ID (see actorcritic.Load).
+// saved environment ID (see actorcritic.Load). Its metadata is
+// discarded: -checkpoint-in is the "manual single-file" resume mode,
+// which has always restarted epoch numbering from 0; -checkpoint-dir
+// (see checkpoints.go) is the mode that continues it.
 func loadInitialParams(checkpointPath, expectedEnvironmentID string) (*actorcritic.Params, error) {
 	if checkpointPath == "" {
 		return nil, nil
 	}
 
-	params, err := actorcritic.LoadFile(checkpointPath, expectedEnvironmentID)
+	params, _, err := actorcritic.LoadFile(checkpointPath, expectedEnvironmentID)
 	if err != nil {
 		return nil, fmt.Errorf("loading checkpoint: %w", err)
 	}

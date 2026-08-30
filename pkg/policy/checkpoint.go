@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/reallyoldfogie/cRL-go/pkg/checkpoint"
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
 
@@ -32,13 +33,15 @@ const (
 
 // checkpointData is the on-disk JSON representation of a Params: its
 // schema version, the environment/action-space identifier it was
-// trained against, its three layer sizes, plus the flattened weight/bias
-// data for every matrix. The sizes are included (rather than inferred
-// from data length alone) so Load can give a precise error when a
-// checkpoint doesn't match the architecture it's being restored into.
+// trained against, its run-progress Metadata, its three layer sizes,
+// plus the flattened weight/bias data for every matrix. The sizes are
+// included (rather than inferred from data length alone) so Load can
+// give a precise error when a checkpoint doesn't match the architecture
+// it's being restored into.
 type checkpointData struct {
 	SchemaVersion CheckpointSchemaVersion `json:"schema_version,omitempty"`
 	EnvironmentID string                  `json:"environment_id,omitempty"`
+	Metadata      checkpoint.Metadata     `json:"metadata"`
 
 	InputSize  int `json:"input_size"`
 	HiddenSize int `json:"hidden_size"`
@@ -53,15 +56,17 @@ type checkpointData struct {
 }
 
 // Save writes p's learned weights and biases to w as JSON, tagged with
-// environmentID (e.g. "snake:36"), so a future process can resume
-// training (or run inference) from the same point via Load instead of
-// always starting from a fresh Xavier/Glorot initialization — and so
-// Load can reject restoring this checkpoint into a different
-// environment than the one it was trained against.
-func (p *Params) Save(w io.Writer, environmentID string) error {
+// environmentID (e.g. "snake:36") and metadata (epoch, best return,
+// total update count), so a future process can resume training (or run
+// inference) from the same point via Load instead of always starting
+// from a fresh Xavier/Glorot initialization — and so Load can reject
+// restoring this checkpoint into a different environment than the one
+// it was trained against.
+func (p *Params) Save(w io.Writer, environmentID string, metadata checkpoint.Metadata) error {
 	data := checkpointData{
 		SchemaVersion: checkpointSchemaVersionCurrent,
 		EnvironmentID: environmentID,
+		Metadata:      metadata,
 		InputSize:     p.InputSize(),
 		HiddenSize:    p.HiddenSize(),
 		OutputSize:    p.OutputSize(),
@@ -95,11 +100,16 @@ type checkpointField struct {
 // unless the checkpoint predates schema versioning entirely (no
 // schema_version field at all, decoded as SchemaVersion's zero value),
 // in which case the EnvironmentID check is skipped so a checkpoint saved
-// before this validation existed still loads.
-func Load(r io.Reader, expectedEnvironmentID string) (*Params, error) {
+// before this validation existed still loads. The returned
+// checkpoint.Metadata is the checkpoint's saved run-progress
+// information; a checkpoint saved before Metadata existed decodes to
+// checkpoint.Metadata's zero value (Epoch 0, so resuming from one
+// starts epoch numbering over, which is the same behavior as not
+// resuming at all).
+func Load(r io.Reader, expectedEnvironmentID string) (*Params, checkpoint.Metadata, error) {
 	var data checkpointData
 	if err := json.NewDecoder(r).Decode(&data); err != nil {
-		return nil, fmt.Errorf("policy: loading checkpoint: %w", err)
+		return nil, checkpoint.Metadata{}, fmt.Errorf("policy: loading checkpoint: %w", err)
 	}
 
 	version := data.SchemaVersion
@@ -107,13 +117,13 @@ func Load(r io.Reader, expectedEnvironmentID string) (*Params, error) {
 		version = checkpointSchemaVersionLegacy
 	}
 	if version != checkpointSchemaVersionLegacy && version != checkpointSchemaVersionCurrent {
-		return nil, fmt.Errorf(
+		return nil, checkpoint.Metadata{}, fmt.Errorf(
 			"policy: loading checkpoint: unsupported schema version %d",
 			version,
 		)
 	}
 	if version >= checkpointSchemaVersionCurrent && data.EnvironmentID != expectedEnvironmentID {
-		return nil, fmt.Errorf(
+		return nil, checkpoint.Metadata{}, fmt.Errorf(
 			"policy: loading checkpoint: saved for environment %q, want %q",
 			data.EnvironmentID, expectedEnvironmentID,
 		)
@@ -138,7 +148,7 @@ func Load(r io.Reader, expectedEnvironmentID string) (*Params, error) {
 	}
 	for _, field := range fields {
 		if len(field.src) != len(field.dst.Data) {
-			return nil, fmt.Errorf(
+			return nil, checkpoint.Metadata{}, fmt.Errorf(
 				"policy: loading checkpoint: %s has %d values, want %d",
 				field.name, len(field.src), len(field.dst.Data),
 			)
@@ -146,18 +156,18 @@ func Load(r io.Reader, expectedEnvironmentID string) (*Params, error) {
 		copy(field.dst.Data, field.src)
 	}
 
-	return params, nil
+	return params, data.Metadata, nil
 }
 
 // SaveFile is a convenience wrapper around Save that writes to the file
 // at path, creating or truncating it as needed.
-func SaveFile(path string, p *Params, environmentID string) error {
+func SaveFile(path string, p *Params, environmentID string, metadata checkpoint.Metadata) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("policy: saving checkpoint: %w", err)
 	}
 
-	if err := p.Save(file, environmentID); err != nil {
+	if err := p.Save(file, environmentID, metadata); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -170,10 +180,10 @@ func SaveFile(path string, p *Params, environmentID string) error {
 
 // LoadFile is a convenience wrapper around Load that reads from the file
 // at path.
-func LoadFile(path string, expectedEnvironmentID string) (*Params, error) {
+func LoadFile(path string, expectedEnvironmentID string) (*Params, checkpoint.Metadata, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("policy: loading checkpoint: %w", err)
+		return nil, checkpoint.Metadata{}, fmt.Errorf("policy: loading checkpoint: %w", err)
 	}
 	defer file.Close()
 

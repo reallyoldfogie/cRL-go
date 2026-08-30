@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/reallyoldfogie/cRL-go/pkg/checkpoint"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,9 +17,9 @@ func TestSaveLoadRoundTripPreservesWeights(t *testing.T) {
 	original := NewParams(rng, 12, 8, 5)
 
 	var buf bytes.Buffer
-	require.NoError(t, original.Save(&buf, "snake:36"))
+	require.NoError(t, original.Save(&buf, "snake:36", checkpoint.Metadata{}))
 
-	loaded, err := Load(&buf, "snake:36")
+	loaded, _, err := Load(&buf, "snake:36")
 	require.NoError(t, err)
 
 	assert.Equal(t, original.InputSize(), loaded.InputSize())
@@ -34,26 +35,40 @@ func TestSaveLoadRoundTripPreservesWeights(t *testing.T) {
 	assert.Equal(t, original.Bv.Data, loaded.Bv.Data)
 }
 
+func TestSaveLoadRoundTripPreservesMetadata(t *testing.T) {
+	rng := rand.New(rand.NewPCG(31, 37))
+	original := NewParams(rng, 6, 4, 3)
+	metadata := checkpoint.Metadata{Epoch: 12, BestReturn: 3.5, TotalUpdates: 480}
+
+	var buf bytes.Buffer
+	require.NoError(t, original.Save(&buf, "snake:36", metadata))
+
+	_, loadedMetadata, err := Load(&buf, "snake:36")
+	require.NoError(t, err)
+	assert.Equal(t, metadata, loadedMetadata)
+}
+
 func TestSaveFileLoadFileRoundTrip(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
 	original := NewParams(rng, 6, 4, 3)
 
 	path := filepath.Join(t.TempDir(), "checkpoint.json")
-	require.NoError(t, SaveFile(path, original, "gridworld:36"))
+	require.NoError(t, SaveFile(path, original, "gridworld:36", checkpoint.Metadata{Epoch: 9}))
 
-	loaded, err := LoadFile(path, "gridworld:36")
+	loaded, metadata, err := LoadFile(path, "gridworld:36")
 	require.NoError(t, err)
 	assert.Equal(t, original.W0.Data, loaded.W0.Data)
 	assert.Equal(t, original.Wv.Data, loaded.Wv.Data)
+	assert.Equal(t, 9, metadata.Epoch)
 }
 
 func TestLoadFileRejectsMissingFile(t *testing.T) {
-	_, err := LoadFile(filepath.Join(t.TempDir(), "does-not-exist.json"), "snake:36")
+	_, _, err := LoadFile(filepath.Join(t.TempDir(), "does-not-exist.json"), "snake:36")
 	assert.Error(t, err)
 }
 
 func TestLoadRejectsInvalidJSON(t *testing.T) {
-	_, err := Load(strings.NewReader("not json"), "snake:36")
+	_, _, err := Load(strings.NewReader("not json"), "snake:36")
 	assert.Error(t, err)
 }
 
@@ -62,16 +77,16 @@ func TestLoadRejectsMismatchedEnvironmentID(t *testing.T) {
 	original := NewParams(rng, 6, 4, 3)
 
 	var buf bytes.Buffer
-	require.NoError(t, original.Save(&buf, "snake:36"))
+	require.NoError(t, original.Save(&buf, "snake:36", checkpoint.Metadata{}))
 
-	_, err := Load(&buf, "gridworld:36")
+	_, _, err := Load(&buf, "gridworld:36")
 	assert.Error(t, err)
 }
 
 func TestLoadRejectsUnsupportedSchemaVersion(t *testing.T) {
 	wrongVersion := `{"schema_version":99,"environment_id":"snake:12","input_size":2,"hidden_size":2,"output_size":1,` +
 		`"w0":[0,0,0,0],"b0":[0,0],"w1":[0,0,0,0],"b1":[0,0],"wpi":[0,0],"bpi":[0],"wv":[0,0],"bv":[0]}`
-	_, err := Load(strings.NewReader(wrongVersion), "snake:12")
+	_, _, err := Load(strings.NewReader(wrongVersion), "snake:12")
 	assert.Error(t, err)
 }
 
@@ -81,7 +96,7 @@ func TestLoadRejectsSizeMismatchedData(t *testing.T) {
 	// zero-padded.
 	corrupt := `{"schema_version":1,"environment_id":"snake:12","input_size":12,"hidden_size":8,"output_size":5,` +
 		`"w0":[1,2,3],"b0":[],"w1":[],"b1":[],"wpi":[],"bpi":[],"wv":[],"bv":[]}`
-	_, err := Load(strings.NewReader(corrupt), "snake:12")
+	_, _, err := Load(strings.NewReader(corrupt), "snake:12")
 	assert.Error(t, err)
 }
 
@@ -89,6 +104,6 @@ func TestSaveFileRejectsUnwritableDirectory(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 8))
 	params := NewParams(rng, 4, 4, 2)
 
-	err := SaveFile(filepath.Join(string(filepath.Separator), "does-not-exist-dir", "checkpoint.json"), params, "snake:4")
+	err := SaveFile(filepath.Join(string(filepath.Separator), "does-not-exist-dir", "checkpoint.json"), params, "snake:4", checkpoint.Metadata{})
 	assert.Error(t, err)
 }

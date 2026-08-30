@@ -16,6 +16,11 @@ type EpochStats struct {
 	Epoch         int
 	AverageReturn float32
 	SampleCount   int
+	// UpdateCount is the number of Adam.Step calls RunEpoch applied
+	// (PPOEpochs passes times however many minibatches each pass split
+	// the collected steps into), so a caller accumulating it across
+	// epochs can populate a checkpoint.Metadata.TotalUpdates.
+	UpdateCount int
 }
 
 // Trainer runs the PPO training loop described in
@@ -148,6 +153,7 @@ func (tr *Trainer) RunEpoch(epoch int) (EpochStats, error) {
 	normalizeAdvantages(steps)
 
 	shuffleRNG := reinforce.WorkerRNG(tr.settings.Seed, epoch, shuffleWorkerIndex)
+	updateCount := 0
 	for range tr.settings.PPOEpochs {
 		shuffleRNG.Shuffle(len(steps), func(i, j int) {
 			steps[i], steps[j] = steps[j], steps[i]
@@ -156,6 +162,7 @@ func (tr *Trainer) RunEpoch(epoch int) (EpochStats, error) {
 		for start := 0; start < len(steps); start += tr.settings.MinibatchSize {
 			end := min(start+tr.settings.MinibatchSize, len(steps))
 			tr.trainOnMinibatch(steps[start:end])
+			updateCount++
 		}
 	}
 
@@ -170,6 +177,7 @@ func (tr *Trainer) RunEpoch(epoch int) (EpochStats, error) {
 		Epoch:         epoch,
 		AverageReturn: returnSum / float32(len(scored)),
 		SampleCount:   len(steps),
+		UpdateCount:   updateCount,
 	}, nil
 }
 
