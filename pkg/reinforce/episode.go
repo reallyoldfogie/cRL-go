@@ -9,6 +9,7 @@
 package reinforce
 
 import (
+	"fmt"
 	"math/rand/v2"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
@@ -43,6 +44,60 @@ func SampleAction(probs *mat.Matrix, rng *rand.Rand) rl.Action {
 		}
 	}
 	return rl.Action(size - 1)
+}
+
+// SampleMaskedAction draws an action from the categorical distribution
+// in probs, exactly like SampleAction, except mask (when non-nil)
+// excludes disallowed actions from consideration: probability mass is
+// renormalized over only the allowed entries before sampling. A nil
+// mask, or a mask where every entry is true, delegates straight to
+// SampleAction, so it reproduces SampleAction's output bit-for-bit for
+// the same rng draw rather than only approximately matching it through
+// a renormalization that happens to divide by (nearly) 1.
+//
+// mask, when non-nil, must have the same length as probs.Data (i.e.
+// len(mask) == ActionSpace()). Returns an error if mask is the wrong
+// length, or if it excludes every action with nonzero probability (no
+// legal action to sample).
+func SampleMaskedAction(probs *mat.Matrix, mask []bool, rng *rand.Rand) (rl.Action, error) {
+	if mask == nil {
+		return SampleAction(probs, rng), nil
+	}
+	if len(mask) != len(probs.Data) {
+		return 0, fmt.Errorf("reinforce: mask length %d does not match action space %d", len(mask), len(probs.Data))
+	}
+
+	allAllowed := true
+	var maskedSum float32
+	for i, allowed := range mask {
+		if allowed {
+			maskedSum += probs.Data[i]
+		} else {
+			allAllowed = false
+		}
+	}
+	if allAllowed {
+		return SampleAction(probs, rng), nil
+	}
+	if maskedSum <= 0 {
+		return 0, fmt.Errorf("reinforce: no legal action: mask excludes every action with nonzero probability")
+	}
+
+	sample := rng.Float32()
+
+	var cumulative float32
+	lastAllowed := -1
+	for i, allowed := range mask {
+		if !allowed {
+			continue
+		}
+		lastAllowed = i
+		cumulative += probs.Data[i] / maskedSum
+		if sample <= cumulative {
+			return rl.Action(i), nil
+		}
+	}
+	return rl.Action(lastAllowed), nil
 }
 
 // computeReturns computes the discounted reward-to-go at every step of

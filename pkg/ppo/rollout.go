@@ -20,9 +20,13 @@ const logProbEpsilon float32 = 1e-8
 // early if the environment reports Done) using an environment built by
 // envFactory and a fresh actorcritic.InferenceNetwork built over params,
 // both private to this call. rng drives both envFactory and action
-// sampling, via reinforce.SampleAction (reused as-is: sampling a
-// category from a probability vector has no algorithm-specific
-// behavior of its own).
+// sampling, via reinforce.SampleMaskedAction with a nil mask (reused
+// as-is: sampling a category from a probability vector has no
+// algorithm-specific behavior of its own). This can't use
+// actorcritic.Actor.Act directly, unlike pkg/reinforce's
+// collectTrajectory: that API only returns a sampled action, not the
+// PolicyOutput/ValueOutput this function also needs to record
+// LogProbs/Values below.
 //
 // Unlike pkg/reinforce's collectTrajectory, this also records, at every
 // step, the sampled action's log-probability and the value head's
@@ -52,7 +56,10 @@ func collectTrajectory(params *actorcritic.Params, envFactory reinforce.EnvFacto
 		copy(net.Input.Val.Data, observation.Values)
 		net.Graph.Forward()
 
-		action := reinforce.SampleAction(net.PolicyOutput.Val, rng)
+		action, err := reinforce.SampleMaskedAction(net.PolicyOutput.Val, nil, rng)
+		if err != nil {
+			return nil, fmt.Errorf("ppo: sampling action: %w", err)
+		}
 		logProbs = append(logProbs, actionLogProb(net.PolicyOutput.Val, action))
 		values = append(values, net.ValueOutput.Val.Data[0])
 

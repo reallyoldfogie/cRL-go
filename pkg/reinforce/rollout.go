@@ -34,9 +34,9 @@ func collectTrajectory(params *policy.Params, envFactory EnvFactory, episodeLen 
 		return nil, fmt.Errorf("reinforce: creating environment: %w", err)
 	}
 
-	net, err := policy.NewInferenceNetwork(params)
+	actor, err := policy.NewActor(params)
 	if err != nil {
-		return nil, fmt.Errorf("reinforce: building inference network: %w", err)
+		return nil, fmt.Errorf("reinforce: building actor: %w", err)
 	}
 
 	observation, err := env.Reset()
@@ -47,10 +47,10 @@ func collectTrajectory(params *policy.Params, envFactory EnvFactory, episodeLen 
 	episode := &rl.Episode{Transitions: make([]rl.Transition, 0, episodeLen)}
 
 	for range episodeLen {
-		copy(net.Input.Val.Data, observation.Values)
-
-		net.Graph.Forward()
-		action := SampleAction(net.Output.Val, rng)
+		action, err := actor.Act(observation, nil, rng)
+		if err != nil {
+			return nil, fmt.Errorf("reinforce: sampling action: %w", err)
+		}
 
 		result, err := env.Step(action)
 		if err != nil {
