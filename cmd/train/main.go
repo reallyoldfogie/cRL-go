@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -83,11 +84,17 @@ func run(args []string) error {
 		return err
 	}
 
+	// Wiring real cancellation (e.g. signal.NotifyContext) through this
+	// command is out of scope for now; context.Background() is what
+	// RunEpoch's ctx.Context parameter exists to support once a caller
+	// needs it (e.g. a live environment that can block).
+	ctx := context.Background()
+
 	bestReturn := resume.BestReturn
 	totalUpdates := resume.TotalUpdates
 
 	for epoch := resume.StartEpoch; epoch < settings.Epochs; epoch++ {
-		stats, err := trainer.RunEpoch(epoch)
+		stats, err := trainer.RunEpoch(ctx, epoch)
 		if err != nil {
 			return err
 		}

@@ -1,8 +1,10 @@
 package ppo
 
 import (
+	"context"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"sync"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
@@ -42,6 +44,13 @@ type Trainer struct {
 	settings   config.Settings
 	envFactory reinforce.EnvFactory
 
+	// persistentEnv, when non-nil, is a long-lived environment built
+	// once (via NewWithPersistentEnv) instead of per-episode via
+	// envFactory; its presence is what collectRollouts uses to choose
+	// collectRolloutsSequential over collectRolloutsParallel. Exactly
+	// one of envFactory/persistentEnv is set, never both.
+	persistentEnv rl.Environment
+
 	params  *actorcritic.Params
 	network *TrainingNetwork
 	adam    *actorcritic.Adam
@@ -50,7 +59,10 @@ type Trainer struct {
 // New constructs a Trainer from settings and envFactory, validating
 // settings and sizing the actor-critic network from envFactory's
 // environment, mirroring pkg/reinforce.New's shape (including the
-// initialParams resume-from-checkpoint convention).
+// initialParams resume-from-checkpoint convention). The resulting
+// Trainer collects rollouts in parallel across settings.Workers
+// goroutines, rebuilding an environment per episode; see
+// NewWithPersistentEnv for a long-lived-environment alternative.
 func New(settings config.Settings, envFactory reinforce.EnvFactory, initialParams *actorcritic.Params) (*Trainer, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
@@ -63,6 +75,49 @@ func New(settings config.Settings, envFactory reinforce.EnvFactory, initialParam
 		return nil, fmt.Errorf("ppo: constructing environment: %w", err)
 	}
 
+	trainer, err := newTrainer(settings, env, initRNG, initialParams)
+	if err != nil {
+		return nil, err
+	}
+	trainer.envFactory = envFactory
+	return trainer, nil
+}
+
+// NewWithPersistentEnv constructs a Trainer exactly like New, except it
+// builds one environment, once, via persistentFactory, and reuses it
+// across every episode of every epoch (collectRolloutsSequential resets
+// it between episodes instead of rebuilding it), rather than rebuilding
+// a fresh one per episode. Rollout collection through this Trainer runs
+// sequentially on the calling goroutine rather than across
+// settings.Workers goroutines, since there is only one environment
+// instance to drive; settings.Workers is simply unused in that case.
+func NewWithPersistentEnv(settings config.Settings, persistentFactory reinforce.PersistentEnvFactory, initialParams *actorcritic.Params) (*Trainer, error) {
+	if err := settings.Validate(); err != nil {
+		return nil, err
+	}
+
+	initRNG := reinforce.WorkerRNG(settings.Seed, 0, initWorkerIndex)
+
+	env, err := persistentFactory(initRNG)
+	if err != nil {
+		return nil, fmt.Errorf("ppo: constructing persistent environment: %w", err)
+	}
+
+	trainer, err := newTrainer(settings, env, initRNG, initialParams)
+	if err != nil {
+		return nil, err
+	}
+	trainer.persistentEnv = env
+	return trainer, nil
+}
+
+// newTrainer builds the params/network/optimizer shared by New and
+// NewWithPersistentEnv from an already-constructed env, used only here
+// to read ObservationSize()/ActionSpace() (and, for a non-nil
+// initialParams, to validate against it) — it is not itself stored on
+// the returned Trainer; callers set either envFactory or persistentEnv
+// afterward depending on which constructor they came from.
+func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand, initialParams *actorcritic.Params) (*Trainer, error) {
 	params := initialParams
 	if params == nil {
 		params = actorcritic.NewParams(initRNG, env.ObservationSize(), settings.HiddenSize, env.ActionSpace())
@@ -80,11 +135,10 @@ func New(settings config.Settings, envFactory reinforce.EnvFactory, initialParam
 	}
 
 	return &Trainer{
-		settings:   settings,
-		envFactory: envFactory,
-		params:     params,
-		network:    network,
-		adam:       actorcritic.NewAdam(network.Actor.Parameters(), settings.LearningRate),
+		settings: settings,
+		params:   params,
+		network:  network,
+		adam:     actorcritic.NewAdam(network.Actor.Parameters(), settings.LearningRate),
 	}, nil
 }
 
@@ -136,9 +190,12 @@ func (tr *Trainer) Params() *actorcritic.Params {
 // and settings.PPOEpochs shuffled-minibatch Adam updates) and returns
 // summary statistics. epoch is used only to derive this epoch's
 // deterministic RNG streams (see WorkerRNG) and to populate
-// EpochStats.Epoch.
-func (tr *Trainer) RunEpoch(epoch int) (EpochStats, error) {
-	rollouts, err := tr.collectRollouts(epoch)
+// EpochStats.Epoch. ctx is threaded through to every
+// rl.Environment.Reset/Step call this epoch makes, so a caller can
+// cancel or time out rollout collection against an environment that can
+// block.
+func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) {
+	rollouts, err := tr.collectRollouts(ctx, epoch)
 	if err != nil {
 		return EpochStats{}, err
 	}
@@ -181,13 +238,24 @@ func (tr *Trainer) RunEpoch(epoch int) (EpochStats, error) {
 	}, nil
 }
 
-// collectRollouts collects settings.RolloutSize trajectories in
+// collectRollouts collects settings.RolloutSize trajectories for this
+// epoch, dispatching to collectRolloutsSequential if tr was built via
+// NewWithPersistentEnv, or collectRolloutsParallel (the original,
+// per-episode-construction path) otherwise.
+func (tr *Trainer) collectRollouts(ctx context.Context, epoch int) ([]*Rollout, error) {
+	if tr.persistentEnv != nil {
+		return tr.collectRolloutsSequential(ctx, epoch)
+	}
+	return tr.collectRolloutsParallel(ctx, epoch)
+}
+
+// collectRolloutsParallel collects settings.RolloutSize trajectories in
 // parallel, bounded to settings.Workers concurrent goroutines,
-// mirroring pkg/reinforce.Trainer.collectRollouts exactly (same
+// mirroring pkg/reinforce.Trainer.collectRolloutsParallel exactly (same
 // parallel-goroutine, per-worker-RNG structure via WorkerRNG), but
 // calling this package's own collectTrajectory to also capture each
 // step's log-probability and value estimate.
-func (tr *Trainer) collectRollouts(epoch int) ([]*Rollout, error) {
+func (tr *Trainer) collectRolloutsParallel(ctx context.Context, epoch int) ([]*Rollout, error) {
 	rollouts := make([]*Rollout, tr.settings.RolloutSize)
 	errs := make([]error, tr.settings.RolloutSize)
 
@@ -203,7 +271,7 @@ func (tr *Trainer) collectRollouts(epoch int) ([]*Rollout, error) {
 			defer func() { <-semaphore }()
 
 			rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, index)
-			rollout, err := collectTrajectory(tr.params, tr.envFactory, tr.settings.EpisodeLen, rng)
+			rollout, err := collectTrajectory(ctx, tr.params, tr.envFactory, tr.settings.EpisodeLen, rng)
 			rollouts[index] = rollout
 			errs[index] = err
 		}(i)
@@ -214,6 +282,27 @@ func (tr *Trainer) collectRollouts(epoch int) ([]*Rollout, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	return rollouts, nil
+}
+
+// collectRolloutsSequential collects settings.RolloutSize trajectories
+// one at a time, on the calling goroutine, against tr.persistentEnv —
+// the counterpart to collectRolloutsParallel for a long-lived
+// environment that must be Reset between episodes rather than rebuilt
+// per episode. Every episode still gets its own deterministic
+// per-(epoch, worker) rng via WorkerRNG, exactly as the parallel path
+// does, just consumed in order rather than from concurrent goroutines;
+// settings.Workers is not consulted here.
+func (tr *Trainer) collectRolloutsSequential(ctx context.Context, epoch int) ([]*Rollout, error) {
+	rollouts := make([]*Rollout, tr.settings.RolloutSize)
+	for i := range tr.settings.RolloutSize {
+		rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, i)
+		rollout, err := collectTrajectoryFromEnv(ctx, tr.params, tr.persistentEnv, tr.settings.EpisodeLen, rng)
+		if err != nil {
+			return nil, err
+		}
+		rollouts[i] = rollout
 	}
 	return rollouts, nil
 }

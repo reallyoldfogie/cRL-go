@@ -1,6 +1,7 @@
 package snakeenv
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
@@ -30,15 +31,18 @@ func (a *Adapter) ActionSpace() int {
 	return NumActions
 }
 
-// Reset implements rl.Environment.
-func (a *Adapter) Reset() (rl.Observation, error) {
+// Reset implements rl.Environment. ctx is accepted only to satisfy the
+// interface; snakeenv is a cheap, synchronous toy environment with
+// nothing to cancel or time out.
+func (a *Adapter) Reset(ctx context.Context) (rl.Observation, error) {
 	a.env.Reset()
 	return a.observation()
 }
 
 // Step implements rl.Environment, translating action (an index into the
-// policy's output layer) into the corresponding snakeenv Action.
-func (a *Adapter) Step(action rl.Action) (rl.StepResult, error) {
+// policy's output layer) into the corresponding snakeenv Action. ctx is
+// accepted only to satisfy the interface, for the same reason as Reset.
+func (a *Adapter) Step(ctx context.Context, action rl.Action) (rl.StepResult, error) {
 	reward, done := a.env.Step(Action(action))
 
 	observation, err := a.observation()

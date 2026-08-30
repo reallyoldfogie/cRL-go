@@ -1,6 +1,10 @@
 package gridworldenv
 
-import "github.com/reallyoldfogie/cRL-go/pkg/rl"
+import (
+	"context"
+
+	"github.com/reallyoldfogie/cRL-go/pkg/rl"
+)
 
 // Adapter wraps an *Env to satisfy rl.Environment, translating between
 // Env's Position/Action-based Reset/Step API and the generic
@@ -24,15 +28,19 @@ func (a *Adapter) ActionSpace() int {
 	return NumActions
 }
 
-// Reset implements rl.Environment.
-func (a *Adapter) Reset() (rl.Observation, error) {
+// Reset implements rl.Environment. ctx is accepted only to satisfy the
+// interface; gridworldenv is a cheap, synchronous toy environment with
+// nothing to cancel or time out.
+func (a *Adapter) Reset(ctx context.Context) (rl.Observation, error) {
 	a.env.Reset()
 	return a.observation()
 }
 
 // Step implements rl.Environment, translating action (an index into the
 // policy's output layer) into the corresponding gridworldenv Action.
-func (a *Adapter) Step(action rl.Action) (rl.StepResult, error) {
+// ctx is accepted only to satisfy the interface, for the same reason as
+// Reset.
+func (a *Adapter) Step(ctx context.Context, action rl.Action) (rl.StepResult, error) {
 	reward, done := a.env.Step(Action(action))
 
 	observation, err := a.observation()

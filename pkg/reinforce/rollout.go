@@ -1,6 +1,7 @@
 package reinforce
 
 import (
+	"context"
 	"fmt"
 	"math/rand/v2"
 
@@ -28,18 +29,28 @@ type EnvFactory func(rng *rand.Rand) (rl.Environment, error)
 // step) and envFactory's environments are themselves safe to construct
 // concurrently (true for the cheap, stateless toy environments in this
 // module; not a general guarantee for every rl.Environment).
-func collectTrajectory(params *policy.Params, envFactory EnvFactory, episodeLen int, rng *rand.Rand) (*rl.Episode, error) {
+func collectTrajectory(ctx context.Context, params *policy.Params, envFactory EnvFactory, episodeLen int, rng *rand.Rand) (*rl.Episode, error) {
 	env, err := envFactory(rng)
 	if err != nil {
 		return nil, fmt.Errorf("reinforce: creating environment: %w", err)
 	}
+	return collectTrajectoryFromEnv(ctx, params, env, episodeLen, rng)
+}
 
+// collectTrajectoryFromEnv is collectTrajectory's shared core: it runs
+// one episode against an already-constructed env (only calling
+// env.Reset to start it, never constructing a new one), so it can back
+// both collectTrajectory (which builds env fresh via an EnvFactory,
+// once per call) and Trainer.collectRolloutsSequential (which reuses
+// one long-lived, PersistentEnvFactory-built env across many calls —
+// see docs/plans/08-context-and-long-lived-environments.md).
+func collectTrajectoryFromEnv(ctx context.Context, params *policy.Params, env rl.Environment, episodeLen int, rng *rand.Rand) (*rl.Episode, error) {
 	actor, err := policy.NewActor(params)
 	if err != nil {
 		return nil, fmt.Errorf("reinforce: building actor: %w", err)
 	}
 
-	observation, err := env.Reset()
+	observation, err := env.Reset(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("reinforce: resetting environment: %w", err)
 	}
@@ -52,7 +63,7 @@ func collectTrajectory(params *policy.Params, envFactory EnvFactory, episodeLen 
 			return nil, fmt.Errorf("reinforce: sampling action: %w", err)
 		}
 
-		result, err := env.Step(action)
+		result, err := env.Step(ctx, action)
 		if err != nil {
 			return nil, fmt.Errorf("reinforce: stepping environment: %w", err)
 		}

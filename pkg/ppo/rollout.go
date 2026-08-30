@@ -1,6 +1,7 @@
 package ppo
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -32,18 +33,28 @@ const logProbEpsilon float32 = 1e-8
 // step, the sampled action's log-probability and the value head's
 // estimate — both required by computeGAE and the PPO loss (see
 // gae.go, loss.go) — as a Rollout alongside the plain rl.Episode.
-func collectTrajectory(params *actorcritic.Params, envFactory reinforce.EnvFactory, episodeLen int, rng *rand.Rand) (*Rollout, error) {
+func collectTrajectory(ctx context.Context, params *actorcritic.Params, envFactory reinforce.EnvFactory, episodeLen int, rng *rand.Rand) (*Rollout, error) {
 	env, err := envFactory(rng)
 	if err != nil {
 		return nil, fmt.Errorf("ppo: creating environment: %w", err)
 	}
+	return collectTrajectoryFromEnv(ctx, params, env, episodeLen, rng)
+}
 
+// collectTrajectoryFromEnv is collectTrajectory's shared core: it runs
+// one episode against an already-constructed env (only calling
+// env.Reset to start it, never constructing a new one), so it can back
+// both collectTrajectory (which builds env fresh via an EnvFactory,
+// once per call) and Trainer.collectRolloutsSequential (which reuses
+// one long-lived, reinforce.PersistentEnvFactory-built env across many
+// calls — see docs/plans/08-context-and-long-lived-environments.md).
+func collectTrajectoryFromEnv(ctx context.Context, params *actorcritic.Params, env rl.Environment, episodeLen int, rng *rand.Rand) (*Rollout, error) {
 	net, err := actorcritic.NewInferenceNetwork(params)
 	if err != nil {
 		return nil, fmt.Errorf("ppo: building inference network: %w", err)
 	}
 
-	observation, err := env.Reset()
+	observation, err := env.Reset(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("ppo: resetting environment: %w", err)
 	}
@@ -63,7 +74,7 @@ func collectTrajectory(params *actorcritic.Params, envFactory reinforce.EnvFacto
 		logProbs = append(logProbs, actionLogProb(net.PolicyOutput.Val, action))
 		values = append(values, net.ValueOutput.Val.Data[0])
 
-		result, err := env.Step(action)
+		result, err := env.Step(ctx, action)
 		if err != nil {
 			return nil, fmt.Errorf("ppo: stepping environment: %w", err)
 		}

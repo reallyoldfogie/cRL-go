@@ -1,6 +1,7 @@
 package ppo
 
 import (
+	"context"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -51,7 +52,7 @@ func TestRunEpochSmokeTestNoPanicsOrNaNs(t *testing.T) {
 	require.NoError(t, err)
 
 	for epoch := range settings.Epochs {
-		stats, err := trainer.RunEpoch(epoch)
+		stats, err := trainer.RunEpoch(context.Background(), epoch)
 		require.NoError(t, err)
 
 		assert.False(t, math.IsNaN(float64(stats.AverageReturn)), "epoch %d: average return is NaN", epoch)
@@ -65,12 +66,12 @@ func TestRunEpochIsDeterministicForAFixedSeed(t *testing.T) {
 
 	trainerA, err := New(settings, snakeEnvFactory(settings.GridSize), nil)
 	require.NoError(t, err)
-	statsA, err := trainerA.RunEpoch(0)
+	statsA, err := trainerA.RunEpoch(context.Background(), 0)
 	require.NoError(t, err)
 
 	trainerB, err := New(settings, snakeEnvFactory(settings.GridSize), nil)
 	require.NoError(t, err)
-	statsB, err := trainerB.RunEpoch(0)
+	statsB, err := trainerB.RunEpoch(context.Background(), 0)
 	require.NoError(t, err)
 
 	// A fixed seed must reproduce identical results regardless of
@@ -127,7 +128,7 @@ func TestRunEpochTrainsAgainstAnyEnvironment(t *testing.T) {
 	require.NoError(t, err)
 
 	for epoch := range settings.Epochs {
-		stats, err := trainer.RunEpoch(epoch)
+		stats, err := trainer.RunEpoch(context.Background(), epoch)
 		require.NoError(t, err)
 
 		assert.False(t, math.IsNaN(float64(stats.AverageReturn)), "epoch %d: average return is NaN", epoch)
@@ -169,7 +170,7 @@ func TestTrainingImprovesAverageReturn(t *testing.T) {
 	var earlySum, lateSum float32
 
 	for epoch := range settings.Epochs {
-		stats, err := trainer.RunEpoch(epoch)
+		stats, err := trainer.RunEpoch(context.Background(), epoch)
 		require.NoError(t, err)
 
 		if epoch < earlyWindow {

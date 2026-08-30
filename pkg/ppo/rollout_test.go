@@ -1,6 +1,7 @@
 package ppo
 
 import (
+	"context"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -28,7 +29,7 @@ func TestCollectTrajectoryProducesFiniteLogProbsAndValues(t *testing.T) {
 	gridSize := 4
 	params := actorcritic.NewParams(rng, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions)
 
-	rollout, err := collectTrajectory(params, snakeEnvFactory(gridSize), 10, rng)
+	rollout, err := collectTrajectory(context.Background(), params, snakeEnvFactory(gridSize), 10, rng)
 	require.NoError(t, err)
 
 	require.NotEmpty(t, rollout.Episode.Transitions)
@@ -51,7 +52,7 @@ func TestCollectTrajectoryIsDeterministicForAFixedSeed(t *testing.T) {
 	build := func() (*Rollout, error) {
 		rng := rand.New(rand.NewPCG(5, 6))
 		params := actorcritic.NewParams(rand.New(rand.NewPCG(5, 6)), snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions)
-		return collectTrajectory(params, snakeEnvFactory(gridSize), 10, rng)
+		return collectTrajectory(context.Background(), params, snakeEnvFactory(gridSize), 10, rng)
 	}
 
 	rolloutA, err := build()

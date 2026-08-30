@@ -5,6 +5,8 @@
 // implementation (e.g. pkg/snakeenv, pkg/gridworldenv).
 package rl
 
+import "context"
+
 // Observation is the fixed-length numeric feature vector a policy
 // network consumes at each step. Every Environment implementation must
 // produce Observations of the same length (see Environment.ObservationSize).
@@ -34,12 +36,22 @@ type StepResult struct {
 // and stateful (e.g. a live game-session adapter); Environment itself
 // makes no promises about construction cost or concurrency safety across
 // instances, so callers should not assume every implementation can be
-// built and run in parallel the way pkg/snakeenv can.
+// built and run in parallel the way pkg/snakeenv can. See
+// pkg/reinforce.EnvFactory (construct a fresh Environment per episode)
+// and pkg/reinforce.PersistentEnvFactory (construct one Environment
+// once and Reset it between episodes) for the two ways a caller can
+// drive one.
+//
+// Reset and Step take a context.Context so a caller can cancel or time
+// out a call against an Environment that can block (e.g. a live game
+// session waiting on a network round-trip) — none of this module's own
+// toy environments need this, but a real environment adapter built on
+// this interface may.
 type Environment interface {
 	// Reset starts a new episode and returns the initial Observation.
-	Reset() (Observation, error)
+	Reset(ctx context.Context) (Observation, error)
 	// Step applies action and returns the resulting StepResult.
-	Step(action Action) (StepResult, error)
+	Step(ctx context.Context, action Action) (StepResult, error)
 	// ObservationSize is the fixed length of every Observation this
 	// Environment produces.
 	ObservationSize() int
