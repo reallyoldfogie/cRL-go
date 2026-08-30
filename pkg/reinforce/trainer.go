@@ -208,7 +208,15 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 	mean, std, sampleCount := returnStatistics(scored)
 
 	tr.trainOnRollouts(scored, mean, std)
+
+	// Lock/Unlock guard only the actual weight mutation (Val), not the
+	// preceding gradient accumulation (which only reads Val and writes
+	// Grad): that's the narrowest section a concurrent Params.Snapshot
+	// (e.g. a live inference Actor sharing tr.params) needs excluded.
+	// See docs/plans/09-concurrency-safe-live-inference.md.
+	tr.params.Lock()
 	tr.network.ApplyGradientStep(tr.settings.LearningRate, sampleCount)
+	tr.params.Unlock()
 
 	var returnSum float32
 	for _, s := range scored {

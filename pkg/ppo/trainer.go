@@ -218,7 +218,19 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 
 		for start := 0; start < len(steps); start += tr.settings.MinibatchSize {
 			end := min(start+tr.settings.MinibatchSize, len(steps))
+
+			// Lock/Unlock guard the whole per-minibatch training unit
+			// (gradient accumulation and the Adam step that mutates Val),
+			// since — unlike pkg/reinforce, which accumulates once over
+			// the whole batch before a single ApplyGradientStep — PPO
+			// repeats this accumulate-then-update cycle once per
+			// minibatch. A concurrent Params.Snapshot (e.g. a live
+			// inference Actor sharing tr.params) must never observe a
+			// partially-applied minibatch update. See
+			// docs/plans/09-concurrency-safe-live-inference.md.
+			tr.params.Lock()
 			tr.trainOnMinibatch(steps[start:end])
+			tr.params.Unlock()
 			updateCount++
 		}
 	}

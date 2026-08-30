@@ -3,29 +3,55 @@ package policy
 import (
 	"fmt"
 	"math/rand/v2"
+	"sync/atomic"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 )
 
-// Actor wraps a Params to provide a single entry point from an
-// observation straight to a sampled action: NewActor once, then Act
-// repeatedly, instead of a caller hand-driving NewInferenceNetwork,
-// copying an observation into its Input, calling Graph.Forward, and
-// sampling the result itself. See docs/plans/07-inference-api-and-action-masking.md.
+// Actor wraps a snapshot of a trained Params to provide a single entry
+// point from an observation straight to a sampled action: NewActor
+// once, then Act repeatedly, instead of a caller hand-driving
+// NewInferenceNetwork, copying an observation into its Input, calling
+// Graph.Forward, and sampling the result itself. See
+// docs/plans/07-inference-api-and-action-masking.md.
+//
+// Act always infers against Actor's own private snapshot (see
+// Params.Snapshot), never against a live Params directly — even if the
+// Params passed to NewActor/Refresh is concurrently being trained (see
+// Params.Lock), Act never blocks on or races with that training.
+// Weight updates only become visible to Act once Refresh is called
+// again; see docs/plans/09-concurrency-safe-live-inference.md for why
+// this snapshot-and-explicit-refresh design was chosen over reading the
+// live Params on every call.
 type Actor struct {
-	params *Params
+	params atomic.Pointer[Params]
 }
 
-// NewActor wraps params in an Actor. params is not copied: Act always
-// reads its current values, so weight updates applied by a
-// concurrently-running trainer are visible to later Act calls exactly
-// as they already are to a freshly-built InferenceNetwork.
+// NewActor wraps a snapshot of params in an Actor (see Params.Snapshot
+// and the Actor doc comment for why a snapshot, not params itself, is
+// stored).
 func NewActor(params *Params) (*Actor, error) {
 	if params == nil {
 		return nil, fmt.Errorf("policy: params must not be nil")
 	}
-	return &Actor{params: params}, nil
+	actor := &Actor{}
+	actor.params.Store(params.Snapshot())
+	return actor, nil
+}
+
+// Refresh replaces the Actor's snapshot with a fresh copy of live's
+// current weights (see Params.Snapshot), so subsequent Act calls reflect
+// any training applied to live since the last NewActor/Refresh call.
+// Safe to call concurrently with Act and with a trainer applying
+// gradient updates to live (guarded by live's own lock — see
+// Params.Lock).
+func (a *Actor) Refresh(live *Params) error {
+	if live == nil {
+		return fmt.Errorf("policy: live params must not be nil")
+	}
+	a.params.Store(live.Snapshot())
+	return nil
 }
 
 // Act builds a fresh InferenceNetwork over the Actor's Params, runs one
@@ -42,7 +68,7 @@ func NewActor(params *Params) (*Actor, error) {
 // that's a narrower, separately-justified optimization on top of this
 // API, not a reason to avoid it here.
 func (a *Actor) Act(obs rl.Observation, mask []bool, rng *rand.Rand) (rl.Action, error) {
-	net, err := NewInferenceNetwork(a.params)
+	net, err := NewInferenceNetwork(a.params.Load())
 	if err != nil {
 		return 0, fmt.Errorf("policy: building inference network: %w", err)
 	}
