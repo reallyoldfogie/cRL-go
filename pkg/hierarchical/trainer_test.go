@@ -57,7 +57,7 @@ func TestRunEpochSmokeTestNoPanicsOrNaNs(t *testing.T) {
 	settings := smallTestSettings()
 	cfg := smallTestConfig()
 
-	trainer, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize))
+	trainer, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize), nil)
 	require.NoError(t, err)
 
 	for epoch := range settings.Epochs {
@@ -74,12 +74,12 @@ func TestRunEpochIsDeterministicForAFixedSeed(t *testing.T) {
 	settings := smallTestSettings()
 	cfg := smallTestConfig()
 
-	trainerA, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize))
+	trainerA, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize), nil)
 	require.NoError(t, err)
 	statsA, err := trainerA.RunEpoch(context.Background(), 0)
 	require.NoError(t, err)
 
-	trainerB, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize))
+	trainerB, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize), nil)
 	require.NoError(t, err)
 	statsB, err := trainerB.RunEpoch(context.Background(), 0)
 	require.NoError(t, err)
@@ -95,7 +95,7 @@ func TestNewRejectsInvalidSettings(t *testing.T) {
 	settings.GridSize = 10 // not a perfect square
 	cfg := smallTestConfig()
 
-	_, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize))
+	_, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize), nil)
 	assert.Error(t, err)
 }
 
@@ -104,7 +104,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	cfg := smallTestConfig()
 	cfg.NumSubgoals = 0
 
-	_, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize))
+	_, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize), nil)
 	assert.Error(t, err)
 }
 
@@ -142,7 +142,7 @@ func TestTrainingImprovesAverageReturn(t *testing.T) {
 		SubLearningRate:  0.003,
 	}
 
-	trainer, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize))
+	trainer, err := New(settings, cfg, hierarchicalGridWorldFactory(settings.GridSize), nil)
 	require.NoError(t, err)
 
 	const earlyWindow = 20

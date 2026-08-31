@@ -32,7 +32,7 @@ Per epoch, `Trainer.RunEpoch` (`pkg/hierarchical/trainer.go`) collects a batch o
 
 ## A toy environment with genuinely competing objectives
 
-`pkg/hierarchicalgridworld` is what gives this design something worth deciding between — unlike `pkg/snakeenv`/`pkg/gridworldenv`, which each have a single objective. `cmd/train-hierarchical` trains against it, printing the meta-controller's and every subgoal's own update counts each epoch alongside the usual average return; see `README.md`'s "Hierarchical RL quickstart" to run it.
+`pkg/hierarchicalgridworld` is what gives this design something worth deciding between — unlike `pkg/snakeenv`/`pkg/gridworldenv`, which each have a single objective. `cmd/train-hierarchical` trains against it, printing the meta-controller's and every subgoal's own update counts each epoch alongside the usual average return; see `README.md`'s "Hierarchical RL quickstart" to run it. It also supports the same `-checkpoint-in`/`-checkpoint-out`/`-checkpoint-dir`/`-checkpoint-interval` flags as `cmd/train-ppo`, saving the meta-controller's and every sub-policy's weights as one atomic checkpoint file per generation (see `pkg/hierarchical.Trainer.Save`/`Load`) rather than N+1 independent files, so a checkpoint can never be resumed from a mix of networks saved at different epochs.
 
 ## Where to go next
 

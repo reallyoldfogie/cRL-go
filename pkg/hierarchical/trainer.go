@@ -72,18 +72,88 @@ func lossConfigFrom(settings config.Settings) ppo.LossConfig {
 	}
 }
 
+// InitialParams bundles a previously-trained meta-controller and every
+// sub-policy's actorcritic.Params, for resuming a Trainer from a
+// checkpoint (see LoadFile) instead of initializing fresh weights via
+// New. Meta must be non-nil and Subs must have exactly cfg.NumSubgoals
+// entries (Subgoal(0) through Subgoal(cfg.NumSubgoals-1)) for whatever
+// Config is passed to New alongside it — New rejects a
+// partially-populated bundle rather than silently initializing missing
+// subgoals fresh alongside resumed ones. See
+// docs/archive/plans/14-hierarchical-checkpointing.md.
+type InitialParams struct {
+	Meta *actorcritic.Params
+	Subs map[Subgoal]*actorcritic.Params
+}
+
+// validateInitialParams reports an error if initial is not fully and
+// exactly populated for cfg: a non-nil Meta and exactly cfg.NumSubgoals
+// entries in Subs with no gaps, so New never silently mixes resumed and
+// freshly-initialized networks within one Trainer.
+func validateInitialParams(initial *InitialParams, cfg Config) error {
+	if initial.Meta == nil {
+		return fmt.Errorf("hierarchical: initial params: meta-controller params must not be nil")
+	}
+	if len(initial.Subs) != cfg.NumSubgoals {
+		return fmt.Errorf(
+			"hierarchical: initial params: have %d sub-policy params, want %d (Config.NumSubgoals)",
+			len(initial.Subs), cfg.NumSubgoals,
+		)
+	}
+	for i := range cfg.NumSubgoals {
+		if initial.Subs[Subgoal(i)] == nil {
+			return fmt.Errorf("hierarchical: initial params: missing sub-policy params for subgoal %d", i)
+		}
+	}
+	return nil
+}
+
+// validateNetworkShape reports an error if params' layer sizes don't
+// match expectedInput/expectedHidden/expectedOutput, mirroring
+// pkg/ppo.validateParamsShape. name identifies which network (e.g.
+// "meta-controller" or "sub-policy 2") a mismatch refers to.
+func validateNetworkShape(name string, params *actorcritic.Params, expectedInput, expectedHidden, expectedOutput int) error {
+	if params.InputSize() != expectedInput {
+		return fmt.Errorf(
+			"hierarchical: %s initial params input size %d does not match expected %d",
+			name, params.InputSize(), expectedInput,
+		)
+	}
+	if params.HiddenSize() != expectedHidden {
+		return fmt.Errorf(
+			"hierarchical: %s initial params hidden size %d does not match expected %d",
+			name, params.HiddenSize(), expectedHidden,
+		)
+	}
+	if params.OutputSize() != expectedOutput {
+		return fmt.Errorf(
+			"hierarchical: %s initial params output size %d does not match expected %d",
+			name, params.OutputSize(), expectedOutput,
+		)
+	}
+	return nil
+}
+
 // New constructs a Trainer from settings, cfg, and envFactory,
 // validating both and sizing every network from envFactory's
 // environment: the meta-controller's input size and every sub-policy's
 // input size (base observation size plus cfg.NumSubgoals — see
 // augmentObservation) come from env.ObservationSize(), and every
-// sub-policy's output size comes from env.ActionSpace().
-func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory) (*Trainer, error) {
+// sub-policy's output size comes from env.ActionSpace(). If initial is
+// non-nil, every network resumes from its given Params (validated
+// against the sizes above) instead of a fresh Xavier/Glorot
+// initialization — see InitialParams and LoadFile.
+func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory, initial *InitialParams) (*Trainer, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	if initial != nil {
+		if err := validateInitialParams(initial, cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	initRNG := reinforce.WorkerRNG(settings.Seed, 0, initWorkerIndex)
@@ -93,7 +163,15 @@ func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory) 
 		return nil, fmt.Errorf("hierarchical: constructing environment: %w", err)
 	}
 
-	metaParams := actorcritic.NewParams(initRNG, env.ObservationSize(), cfg.MetaHiddenSize, cfg.NumSubgoals)
+	var metaParams *actorcritic.Params
+	if initial != nil {
+		metaParams = initial.Meta
+		if err := validateNetworkShape("meta-controller", metaParams, env.ObservationSize(), cfg.MetaHiddenSize, cfg.NumSubgoals); err != nil {
+			return nil, err
+		}
+	} else {
+		metaParams = actorcritic.NewParams(initRNG, env.ObservationSize(), cfg.MetaHiddenSize, cfg.NumSubgoals)
+	}
 	metaNetwork, err := ppo.NewTrainingNetwork(metaParams, lossConfigFrom(settings))
 	if err != nil {
 		return nil, fmt.Errorf("hierarchical: building meta-controller training network: %w", err)
@@ -104,7 +182,17 @@ func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory) 
 	subAdams := make(map[Subgoal]*actorcritic.Adam, cfg.NumSubgoals)
 	for i := range cfg.NumSubgoals {
 		subgoal := Subgoal(i)
-		params := actorcritic.NewParams(initRNG, env.ObservationSize()+cfg.NumSubgoals, cfg.SubHiddenSize, env.ActionSpace())
+
+		var params *actorcritic.Params
+		if initial != nil {
+			params = initial.Subs[subgoal]
+			if err := validateNetworkShape(fmt.Sprintf("sub-policy %d", subgoal), params, env.ObservationSize()+cfg.NumSubgoals, cfg.SubHiddenSize, env.ActionSpace()); err != nil {
+				return nil, err
+			}
+		} else {
+			params = actorcritic.NewParams(initRNG, env.ObservationSize()+cfg.NumSubgoals, cfg.SubHiddenSize, env.ActionSpace())
+		}
+
 		network, err := ppo.NewTrainingNetwork(params, lossConfigFrom(settings))
 		if err != nil {
 			return nil, fmt.Errorf("hierarchical: building sub-policy training network for subgoal %d: %w", subgoal, err)
@@ -263,9 +351,9 @@ func trainOnMinibatch(network *ppo.TrainingNetwork, adam *actorcritic.Adam, mini
 }
 
 // Params exposes the meta-controller's and every sub-policy's current
-// parameters, e.g. so a future checkpoint-tooling addition (out of
-// scope here, see docs/plans/11-hierarchical-meta-controller-and-subpolicies.md's
-// "Explicitly out of scope") can persist all N+1 networks.
+// parameters, e.g. to save a checkpoint (see Trainer.Save/SaveFile)
+// after training so a later session can resume from it via New's
+// initial parameter.
 func (tr *Trainer) Params() (meta *actorcritic.Params, subs map[Subgoal]*actorcritic.Params) {
 	return tr.metaParams, tr.subParams
 }

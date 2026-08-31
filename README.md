@@ -101,4 +101,4 @@ Run `go run ./cmd/train-ppo -h` for the full list of flags. `pkg/policy`/`pkg/re
 go run ./cmd/train-hierarchical -epochs=500 -num-subgoals=4 -subgoal-interval=8 -meta-hidden-size=16 -sub-hidden-size=16
 ```
 
-Run `go run ./cmd/train-hierarchical -h` for the full list of flags. Checkpointing isn't supported for this trainer yet. See `docs/11-hierarchical-meta-controller-and-subpolicies.md` for how the meta-controller/sub-policy split works and why it reuses `pkg/ppo`'s training machinery unchanged.
+Run `go run ./cmd/train-hierarchical -h` for the full list of flags. It supports the same `-checkpoint-in`/`-checkpoint-out`/`-checkpoint-dir`/`-checkpoint-interval` conventions as `cmd/train-ppo` (see "Checkpoints" above), saving the meta-controller's and every sub-policy's weights as one checkpoint file per generation. See `docs/11-hierarchical-meta-controller-and-subpolicies.md` for how the meta-controller/sub-policy split works and why it reuses `pkg/ppo`'s training machinery unchanged.
