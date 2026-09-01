@@ -103,3 +103,27 @@ func TestObservationSizeMatchesEncodingLayout(t *testing.T) {
 	// adds a third segment for direction of travel.
 	assert.Equal(t, 2*9, ObservationSize(9))
 }
+
+func TestRenderPlacesAgentAndGoalMarkers(t *testing.T) {
+	env := newTestEnv(t)
+	env.Agent = Position{X: 1, Y: 1}
+
+	lines := env.Render()
+	require.Len(t, lines, env.Rows)
+	for _, l := range lines {
+		assert.Len(t, l, env.Cols)
+	}
+
+	// Lines()'s row 0 is the highest Y, so Y is at index Rows-1-Y.
+	assert.Equal(t, uint8('@'), lines[env.Rows-1-1][1])
+	assert.Equal(t, uint8('G'), lines[env.Rows-1-env.Goal.Y][env.Goal.X])
+}
+
+func TestRenderOmitsAgentMarkerOnceOutOfBounds(t *testing.T) {
+	env := newTestEnv(t)
+	env.Agent = Position{X: -1, Y: 0}
+
+	for _, l := range env.Render() {
+		assert.NotContains(t, l, "@")
+	}
+}

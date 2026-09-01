@@ -118,3 +118,34 @@ func TestStateVectorSizeMatchesEncodingLayout(t *testing.T) {
 	// 2*gridSize (snake + food one-hot segments) + NumActions (pov segment).
 	assert.Equal(t, 2*36+NumActions, StateVectorSize(36))
 }
+
+func TestRenderPlacesSnakeAndFoodMarkers(t *testing.T) {
+	env := newTestEnv(t, 1)
+	env.Snake = Position{X: 2, Y: 2}
+	env.Food = Position{X: 4, Y: 4}
+
+	lines := env.Render()
+	require.Len(t, lines, env.Rows)
+	for _, renderedLine := range lines {
+		assert.Len(t, renderedLine, env.Cols)
+	}
+
+	// Lines()'s row 0 is the highest Y, so Y=2 is at index Rows-1-2.
+	assert.Equal(t, uint8('@'), lineAt(lines, env.Rows, 2)[2])
+	assert.Equal(t, uint8('F'), lineAt(lines, env.Rows, 4)[4])
+}
+
+func TestRenderOmitsSnakeMarkerOnceGameOver(t *testing.T) {
+	env := newTestEnv(t, 2)
+	env.Snake = Position{X: -1, Y: 0} // out of bounds
+
+	for _, l := range env.Render() {
+		assert.NotContains(t, l, "@")
+	}
+}
+
+// lineAt returns lines[y]'s content, accounting for Render's
+// highest-Y-first ordering (see pkg/gridrender.Grid.Lines).
+func lineAt(lines []string, rows, y int) string {
+	return lines[rows-1-y]
+}

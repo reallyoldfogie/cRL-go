@@ -19,6 +19,7 @@ import (
 	"github.com/reallyoldfogie/cRL-go/pkg/checkpoint"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
 	"github.com/reallyoldfogie/cRL-go/pkg/gridworldenv"
+	"github.com/reallyoldfogie/cRL-go/pkg/metrics"
 	"github.com/reallyoldfogie/cRL-go/pkg/ppo"
 	"github.com/reallyoldfogie/cRL-go/pkg/reinforce"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
@@ -39,6 +40,7 @@ func run(args []string) error {
 	checkpointOut := fs.String("checkpoint-out", "", "path to save the trained actor-critic weights to after training completes (optional)")
 	checkpointDir := fs.String("checkpoint-dir", "", "directory to auto-resume the latest checkpoint from, and periodically save numbered checkpoints into (optional; independent of -checkpoint-in/-checkpoint-out)")
 	checkpointInterval := fs.Int("checkpoint-interval", 50, "save a checkpoint to -checkpoint-dir every N epochs (only used if -checkpoint-dir is set)")
+	metricsOut := fs.String("metrics-out", "", "path to write one CSV row of per-epoch metrics to (optional; see docs/plans/15-agent-and-training-visualization.md)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -85,6 +87,14 @@ func run(args []string) error {
 		return err
 	}
 
+	var metricsWriter *metrics.CSVWriter
+	if *metricsOut != "" {
+		metricsWriter, err = metrics.NewCSVWriter(*metricsOut, []string{"epoch", "average_return", "sample_count", "update_count"})
+		if err != nil {
+			return err
+		}
+	}
+
 	// Wiring real cancellation (e.g. signal.NotifyContext) through this
 	// command is out of scope for now; context.Background() is what
 	// RunEpoch's ctx.Context parameter exists to support once a caller
@@ -109,11 +119,23 @@ func run(args []string) error {
 			stats.Epoch, stats.AverageReturn, stats.SampleCount,
 		)
 
+		if metricsWriter != nil {
+			if err := metricsWriter.WriteRow(stats.Epoch, stats.AverageReturn, stats.SampleCount, stats.UpdateCount); err != nil {
+				return err
+			}
+		}
+
 		interval := *checkpointInterval
 		if *checkpointDir != "" && interval > 0 && (epoch+1)%interval == 0 {
 			if err := saveCheckpointToDir(*checkpointDir, trainer.Params(), environmentID, epoch, bestReturn, totalUpdates); err != nil {
 				return fmt.Errorf("saving periodic checkpoint: %w", err)
 			}
+		}
+	}
+
+	if metricsWriter != nil {
+		if err := metricsWriter.Close(); err != nil {
+			return err
 		}
 	}
 

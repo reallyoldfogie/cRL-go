@@ -11,6 +11,7 @@ A Go reimplementation based on [`harshbhatt7585/cRL`](https://github.com/harshbh
 - An environment-agnostic training core (`pkg/rl`) with two example environments: a grid-foraging environment (`pkg/snakeenv`) and a goal-seeking gridworld (`pkg/gridworldenv`). `rl.Environment.Reset`/`Step` take a `context.Context`, and both `pkg/reinforce.Trainer` and `pkg/ppo.Trainer` can be built with an `EnvFactory` (rebuilt per episode) or a `PersistentEnvFactory` (built once, reused via `Reset` across episodes) for environments that are expensive to construct or need to stay alive across an episode boundary.
 - A REINFORCE trainer (`pkg/reinforce`) with concurrent rollout collection.
 - Config-file + CLI-flag support for hyperparameters (`pkg/config`, `configs/config.json`).
+- Optional per-epoch CSV metrics export (`-metrics-out`, `pkg/metrics`) on every `cmd/train*` binary, and a `cmd/watch` binary that renders a trained checkpoint acting in `pkg/snakeenv`/`pkg/gridworldenv` step by step in the terminal (via a `Render()` method on each environment, built on `pkg/gridrender`) for eyeballing behavior rather than only reading return numbers.
 
 See `docs/` for a from-first-principles explanation of the machine learning concepts involved: neural networks and backpropagation (`01`-`02`), REINFORCE and numerical stability (`03`-`04`), actor-critic networks, Generalized Advantage Estimation, PPO's clipped objective, and Adam/minibatch training (`07`-`09`), live inference/action masking (`10`), hierarchical meta-controller/sub-policy training (`11`), and context-aware/long-lived environments (`12`). `docs/05-porting-notes.md` covers every deliberate difference from the original C implementation, and `docs/06-checkpoints-and-auto-resume.md` covers the checkpoint save/resume/inspect workflow.
 
@@ -75,6 +76,16 @@ go run ./cmd/train-ppo -epochs=500 -checkpoint-dir=checkpoints/ppo -checkpoint-i
 
 Inspect the resulting files with `go run ./cmd/checkpoint-tool list <dir>` or `info <checkpoint>`. See `docs/06-checkpoints-and-auto-resume.md` for the complete workflow and metadata format.
 
+### Metrics export
+
+Every `cmd/train*` binary accepts an optional `-metrics-out` flag, writing one CSV row per epoch (in addition to the usual stdout printing) for plotting or analysis with any external tool:
+
+```sh
+go run ./cmd/train -epochs=500 -metrics-out=metrics.csv
+```
+
+Columns differ slightly per binary to match its own progress fields (e.g. `cmd/train-ppo` includes `update_count`; `cmd/train-hierarchical` includes `meta_update_count` plus one `sub_N_updates` column per `-num-subgoals`).
+
 ### Tests
 
 ```sh
@@ -102,3 +113,14 @@ go run ./cmd/train-hierarchical -epochs=500 -num-subgoals=4 -subgoal-interval=8 
 ```
 
 Run `go run ./cmd/train-hierarchical -h` for the full list of flags. It supports the same `-checkpoint-in`/`-checkpoint-out`/`-checkpoint-dir`/`-checkpoint-interval` conventions as `cmd/train-ppo` (see "Checkpoints" above), saving the meta-controller's and every sub-policy's weights as one checkpoint file per generation. See `docs/11-hierarchical-meta-controller-and-subpolicies.md` for how the meta-controller/sub-policy split works and why it reuses `pkg/ppo`'s training machinery unchanged.
+
+## Watch mode
+
+`cmd/watch` loads a checkpoint saved by `cmd/train` or `cmd/train-ppo` and renders one episode of it acting in `pkg/snakeenv`/`pkg/gridworldenv` step by step in the terminal, for eyeballing whether a trained policy behaves sensibly:
+
+```sh
+go run ./cmd/train -env=snake -grid-size=36 -epochs=200 -checkpoint-out=checkpoints/reinforce.json
+go run ./cmd/watch -env=snake -algo=reinforce -grid-size=36 -checkpoint=checkpoints/reinforce.json
+```
+
+Use `-algo=ppo` for a `cmd/train-ppo` checkpoint. `-delay` controls the pause between steps and `-episode-len` caps how long it renders before giving up. `pkg/hierarchical` checkpoints aren't supported yet — see `docs/plans/15-agent-and-training-visualization.md`. Run `go run ./cmd/watch -h` for the full list of flags.

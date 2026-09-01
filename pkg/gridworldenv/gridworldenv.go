@@ -12,6 +12,8 @@ package gridworldenv
 import (
 	"fmt"
 	"math"
+
+	"github.com/reallyoldfogie/cRL-go/pkg/gridrender"
 )
 
 // Action is one of the four moves the agent can take.
@@ -126,6 +128,20 @@ func (e *Env) Step(action Action) (reward float32, done bool) {
 		return reward + goalReward, true
 	}
 	return reward, false
+}
+
+// Render returns a human-readable snapshot of the grid for "watch
+// mode" (see cmd/watch): '.' for an empty cell, 'G' for the goal, and
+// '@' for the agent (omitted once OutOfBounds, since it no longer
+// occupies a cell on the grid). It's for eyeballing an episode, not
+// for feeding a policy — see BuildObservation for that.
+func (e *Env) Render() []string {
+	grid := gridrender.New(e.Rows, e.Cols, '.')
+	grid.Set(e.Goal.X, e.Goal.Y, 'G')
+	if !e.OutOfBounds() {
+		grid.Set(e.Agent.X, e.Agent.Y, '@')
+	}
+	return grid.Lines()
 }
 
 // BuildObservation fills dst with a one-hot encoding of the given agent

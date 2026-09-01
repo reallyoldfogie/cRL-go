@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand/v2"
 
+	"github.com/reallyoldfogie/cRL-go/pkg/gridrender"
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
 
@@ -164,6 +165,20 @@ func (e *Env) Step(action Action) (reward float32, done bool) {
 	e.Score += reward
 	e.Steps++
 	return reward, done
+}
+
+// Render returns a human-readable snapshot of the grid for "watch
+// mode" (see cmd/watch): '.' for an empty cell, 'F' for the food, and
+// '@' for the snake (the agent, omitted once GameOver, since it no
+// longer occupies a cell on the grid). It's for eyeballing an episode,
+// not for feeding a policy — see BuildStateVector for that.
+func (e *Env) Render() []string {
+	grid := gridrender.New(e.Rows, e.Cols, '.')
+	grid.Set(int(e.Food.X), int(e.Food.Y), 'F')
+	if !e.GameOver() {
+		grid.Set(int(e.Snake.X), int(e.Snake.Y), '@')
+	}
+	return grid.Lines()
 }
 
 // BuildStateVector fills dst with a one-hot encoding of the given state:

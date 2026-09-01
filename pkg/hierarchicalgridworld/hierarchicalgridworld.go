@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+
+	"github.com/reallyoldfogie/cRL-go/pkg/gridrender"
 )
 
 // Action is one of the seven actions the agent can take: four
@@ -278,6 +280,27 @@ func abs(value int) int {
 		return -value
 	}
 	return value
+}
+
+// Render returns a human-readable snapshot of the grid for "watch
+// mode" (see cmd/watch): '.' for an empty cell, 'T' for the build
+// target, 'R' for the resource, 'H' for the hazard, 'M' for an active
+// mob, and '@' for the agent, drawn last so it's visible even when
+// standing on another entity's cell (omitted once OutOfBounds, since
+// it no longer occupies a cell on the grid). It's for eyeballing an
+// episode, not for feeding a policy — see BuildObservation for that.
+func (e *Env) Render() []string {
+	grid := gridrender.New(e.Rows, e.Cols, '.')
+	grid.Set(e.BuildTarget.X, e.BuildTarget.Y, 'T')
+	grid.Set(e.Resource.X, e.Resource.Y, 'R')
+	grid.Set(e.Hazard.X, e.Hazard.Y, 'H')
+	if e.MobActive {
+		grid.Set(e.Mob.X, e.Mob.Y, 'M')
+	}
+	if !e.OutOfBounds() {
+		grid.Set(e.Agent.X, e.Agent.Y, '@')
+	}
+	return grid.Lines()
 }
 
 // State is the subset of Env's fields BuildObservation needs, kept

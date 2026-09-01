@@ -166,6 +166,56 @@ func TestStepStandingOnActiveMobInflictsPenalty(t *testing.T) {
 	assert.Equal(t, -stepPenalty-mobPenalty, reward)
 }
 
+func TestRenderPlacesEveryEntityMarker(t *testing.T) {
+	env := newTestEnv(t, 1)
+	env.Agent = Position{X: 0, Y: 0}
+	env.BuildTarget = Position{X: 1, Y: 0}
+	env.Resource = Position{X: 2, Y: 0}
+	env.Hazard = Position{X: 3, Y: 0}
+	env.MobActive = true
+	env.Mob = Position{X: 0, Y: 1}
+
+	lines := env.Render()
+	require.Len(t, lines, env.Rows)
+	for _, l := range lines {
+		assert.Len(t, l, env.Cols)
+	}
+
+	row0 := lines[env.Rows-1] // Y=0
+	assert.Equal(t, uint8('@'), row0[0])
+	assert.Equal(t, uint8('T'), row0[1])
+	assert.Equal(t, uint8('R'), row0[2])
+	assert.Equal(t, uint8('H'), row0[3])
+	assert.Equal(t, uint8('M'), lines[env.Rows-1-1][0])
+}
+
+func TestRenderOmitsMobMarkerWhenInactive(t *testing.T) {
+	env := newTestEnv(t, 2)
+	env.MobActive = false
+
+	for _, l := range env.Render() {
+		assert.NotContains(t, l, "M")
+	}
+}
+
+func TestRenderDrawsAgentOnTopOfAnotherEntity(t *testing.T) {
+	env := newTestEnv(t, 3)
+	env.Agent = Position{X: 1, Y: 1}
+	env.Hazard = Position{X: 1, Y: 1}
+
+	lines := env.Render()
+	assert.Equal(t, uint8('@'), lines[env.Rows-1-1][1])
+}
+
+func TestRenderOmitsAgentMarkerOnceOutOfBounds(t *testing.T) {
+	env := newTestEnv(t, 4)
+	env.Agent = Position{X: -1, Y: 0}
+
+	for _, l := range env.Render() {
+		assert.NotContains(t, l, "@")
+	}
+}
+
 func TestBuildObservationOneHotEncoding(t *testing.T) {
 	gridSize, cols := 16, 4
 	dst := make([]float32, ObservationSize(gridSize))

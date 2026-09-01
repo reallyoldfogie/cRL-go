@@ -23,6 +23,7 @@ import (
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
 	"github.com/reallyoldfogie/cRL-go/pkg/hierarchical"
 	"github.com/reallyoldfogie/cRL-go/pkg/hierarchicalgridworld"
+	"github.com/reallyoldfogie/cRL-go/pkg/metrics"
 	"github.com/reallyoldfogie/cRL-go/pkg/reinforce"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 )
@@ -50,6 +51,7 @@ func run(args []string) error {
 	checkpointOut := fs.String("checkpoint-out", "", "path to save the trained meta-controller and sub-policy weights to after training completes (optional)")
 	checkpointDir := fs.String("checkpoint-dir", "", "directory to auto-resume the latest checkpoint from, and periodically save numbered checkpoints into (optional; independent of -checkpoint-in/-checkpoint-out)")
 	checkpointInterval := fs.Int("checkpoint-interval", 50, "save a checkpoint to -checkpoint-dir every N epochs (only used if -checkpoint-dir is set)")
+	metricsOut := fs.String("metrics-out", "", "path to write one CSV row of per-epoch metrics to (optional; see docs/plans/15-agent-and-training-visualization.md)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -109,6 +111,18 @@ func run(args []string) error {
 		return err
 	}
 
+	var metricsWriter *metrics.CSVWriter
+	if *metricsOut != "" {
+		header := []string{"epoch", "average_return", "sample_count", "meta_update_count"}
+		for s := range cfg.NumSubgoals {
+			header = append(header, fmt.Sprintf("sub_%d_updates", s))
+		}
+		metricsWriter, err = metrics.NewCSVWriter(*metricsOut, header)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Wiring real cancellation (e.g. signal.NotifyContext) through this
 	// command is out of scope for now; context.Background() is what
 	// RunEpoch's ctx.Context parameter exists to support once a caller
@@ -141,11 +155,27 @@ func run(args []string) error {
 		}
 		fmt.Println()
 
+		if metricsWriter != nil {
+			row := []any{stats.Epoch, stats.AverageReturn, stats.SampleCount, stats.MetaUpdateCount}
+			for s := range cfg.NumSubgoals {
+				row = append(row, stats.SubUpdateCounts[hierarchical.Subgoal(s)])
+			}
+			if err := metricsWriter.WriteRow(row...); err != nil {
+				return err
+			}
+		}
+
 		interval := *checkpointInterval
 		if *checkpointDir != "" && interval > 0 && (epoch+1)%interval == 0 {
 			if err := saveCheckpointToDir(*checkpointDir, trainer, environmentID, epoch, bestReturn, totalUpdates); err != nil {
 				return fmt.Errorf("saving periodic checkpoint: %w", err)
 			}
+		}
+	}
+
+	if metricsWriter != nil {
+		if err := metricsWriter.Close(); err != nil {
+			return err
 		}
 	}
 
