@@ -4,12 +4,9 @@
 // only reading its average-return numbers — see
 // docs/plans/15-agent-and-training-visualization.md.
 //
-// It supports checkpoints saved by cmd/train (REINFORCE, pkg/policy)
-// and cmd/train-ppo (PPO, pkg/actorcritic). pkg/hierarchical isn't
-// supported yet: it has no single live-inference Actor driving both the
-// meta-controller and the active sub-policy the way policy.Actor/
-// actorcritic.Actor drive one flat network — see that plan's open
-// questions.
+// It supports checkpoints saved by cmd/train (REINFORCE, pkg/policy),
+// cmd/train-ppo (PPO, pkg/actorcritic), and cmd/train-hierarchical
+// (hierarchical, pkg/hierarchical, via hierarchical.Actor).
 package main
 
 import (
@@ -23,6 +20,8 @@ import (
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/gridworldenv"
+	"github.com/reallyoldfogie/cRL-go/pkg/hierarchical"
+	"github.com/reallyoldfogie/cRL-go/pkg/hierarchicalgridworld"
 	"github.com/reallyoldfogie/cRL-go/pkg/policy"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 	"github.com/reallyoldfogie/cRL-go/pkg/snakeenv"
@@ -36,13 +35,15 @@ func main() {
 
 func run(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	envName := fs.String("env", "snake", "environment to watch: snake or gridworld")
-	algo := fs.String("algo", "reinforce", "which algorithm the checkpoint was trained with: reinforce or ppo")
+	envName := fs.String("env", "snake", "environment to watch: snake, gridworld, or hierarchicalgridworld")
+	algo := fs.String("algo", "reinforce", "which algorithm the checkpoint was trained with: reinforce, ppo, or hierarchical")
 	gridSize := fs.Int("grid-size", 36, "grid size the checkpoint was trained against (must match the training run's -grid-size)")
-	checkpointPath := fs.String("checkpoint", "", "path to a checkpoint saved by cmd/train or cmd/train-ppo (required)")
+	checkpointPath := fs.String("checkpoint", "", "path to a checkpoint saved by cmd/train, cmd/train-ppo, or cmd/train-hierarchical (required)")
 	episodeLen := fs.Int("episode-len", 100, "maximum number of steps to render before stopping")
 	delay := fs.Duration("delay", 300*time.Millisecond, "how long to pause between rendered steps")
 	seed := fs.Uint64("seed", 1, "seed for the environment's own randomness (e.g. food/goal placement) and action sampling")
+	numSubgoals := fs.Int("num-subgoals", 4, "number of subgoals the checkpoint's meta-controller chooses among (only used with -algo=hierarchical; must match the training run's -num-subgoals)")
+	subgoalInterval := fs.Int("subgoal-interval", 8, "environment steps between meta-controller decisions (only used with -algo=hierarchical; must match the training run's -subgoal-interval)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -56,13 +57,14 @@ func run(args []string) error {
 		return err
 	}
 
-	// environmentID mirrors cmd/train's/cmd/train-ppo's own convention
-	// (e.g. "snake:36"), so a checkpoint trained against a different
-	// -env/-grid-size is rejected outright rather than loaded into a
-	// mismatched network shape.
+	// environmentID mirrors cmd/train's/cmd/train-ppo's/
+	// cmd/train-hierarchical's own convention (e.g. "snake:36"), so a
+	// checkpoint trained against a different -env/-grid-size is
+	// rejected outright rather than loaded into a mismatched network
+	// shape.
 	environmentID := fmt.Sprintf("%s:%d", *envName, *gridSize)
 
-	act, err := newActFunc(*algo, *checkpointPath, environmentID)
+	act, reset, err := newActFunc(*algo, *checkpointPath, environmentID, *numSubgoals, *subgoalInterval)
 	if err != nil {
 		return err
 	}
@@ -72,11 +74,12 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	reset()
 
 	for step := 0; step < *episodeLen; step++ {
 		renderStep(step, render())
 
-		decision, err := act(obs, rng)
+		decision, extra, err := act(obs, rng)
 		if err != nil {
 			return err
 		}
@@ -85,7 +88,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		printDecision(decision, result.Reward)
+		printDecision(decision, extra, result.Reward)
 		time.Sleep(*delay)
 
 		obs = result.Observation
@@ -102,14 +105,18 @@ func run(args []string) error {
 // printDecision prints the chosen action, the probability it was
 // sampled with (from rl.Decision.Probabilities, see
 // docs/plans/16-decision-auditing-and-explainability.md), the critic's
-// value estimate when the underlying Actor has one, and the reward the
-// environment returned for taking it — a low chosen-action probability
-// signals an undertrained or genuinely ambiguous decision point, not
-// visible from the action/reward alone.
-func printDecision(decision rl.Decision, reward float32) {
+// value estimate when the underlying Actor has one, any algorithm-
+// specific extra context (e.g. hierarchical.Actor's active subgoal),
+// and the reward the environment returned for taking it — a low
+// chosen-action probability signals an undertrained or genuinely
+// ambiguous decision point, not visible from the action/reward alone.
+func printDecision(decision rl.Decision, extra string, reward float32) {
 	fmt.Printf("action=%d prob=%.3f", decision.Action, decision.Probabilities[decision.Action])
 	if decision.HasValue {
 		fmt.Printf(" value=%.3f", decision.Value)
+	}
+	if extra != "" {
+		fmt.Printf(" %s", extra)
 	}
 	fmt.Printf(" reward=%.2f\n", reward)
 }
@@ -151,50 +158,86 @@ func newWatchEnv(envName string, gridSize int, rng *rand.Rand) (rl.Environment, 
 			return nil, nil, err
 		}
 		return gridworldenv.NewAdapter(env), env.Render, nil
+	case "hierarchicalgridworld":
+		env, err := hierarchicalgridworld.New(gridSize, rng)
+		if err != nil {
+			return nil, nil, err
+		}
+		return hierarchicalgridworld.NewAdapter(env), env.Render, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown -env %q, want \"snake\" or \"gridworld\"", envName)
+		return nil, nil, fmt.Errorf("unknown -env %q, want \"snake\", \"gridworld\", or \"hierarchicalgridworld\"", envName)
 	}
 }
 
-// actFunc samples one decision from an observation, matching
-// policy.Actor.ActWithInfo's and actorcritic.Actor.ActWithInfo's
-// shared signature (mask is always nil here: watch mode has no
-// legality constraints of its own to enforce).
-type actFunc func(obs rl.Observation, rng *rand.Rand) (rl.Decision, error)
+// actFunc samples one decision from an observation, returning the
+// rl.Decision that determined the environment action plus an optional
+// extra line of algorithm-specific context to print alongside it
+// (empty for policy.Actor/actorcritic.Actor; hierarchical.Actor uses
+// it to report the currently-active subgoal and whether a new
+// meta-decision was just made).
+type actFunc func(obs rl.Observation, rng *rand.Rand) (decision rl.Decision, extra string, err error)
 
 // newActFunc loads the checkpoint at checkpointPath as the algorithm
-// named by algo, returning an actFunc that samples from it. It uses
-// ActWithInfo rather than Act so watch mode can display why an action
-// was chosen (its sampled probability, and a value estimate when
-// available), not only which action was chosen — see
+// named by algo, returning an actFunc that samples from it and a reset
+// func to call once per episode, before the first actFunc call of that
+// episode (a no-op for policy/actorcritic; hierarchical.Actor needs it
+// to clear which subgoal is active, since it's the only stateful Actor
+// here — see pkg/hierarchical/actor.go). Every case uses ActWithInfo
+// rather than Act so watch mode can display why an action was chosen
+// (its sampled probability, and a value estimate when available), not
+// only which action was chosen — see
 // docs/plans/16-decision-auditing-and-explainability.md.
-func newActFunc(algo, checkpointPath, environmentID string) (actFunc, error) {
+func newActFunc(algo, checkpointPath, environmentID string, numSubgoals, subgoalInterval int) (actFunc, func(), error) {
+	noopReset := func() {}
+
 	switch algo {
 	case "reinforce":
 		params, _, err := policy.LoadFile(checkpointPath, environmentID)
 		if err != nil {
-			return nil, fmt.Errorf("loading checkpoint: %w", err)
+			return nil, nil, fmt.Errorf("loading checkpoint: %w", err)
 		}
 		actor, err := policy.NewActor(params)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, error) {
-			return actor.ActWithInfo(obs, nil, rng)
-		}, nil
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, error) {
+			decision, err := actor.ActWithInfo(obs, nil, rng)
+			return decision, "", err
+		}, noopReset, nil
 	case "ppo":
 		params, _, err := actorcritic.LoadFile(checkpointPath, environmentID)
 		if err != nil {
-			return nil, fmt.Errorf("loading checkpoint: %w", err)
+			return nil, nil, fmt.Errorf("loading checkpoint: %w", err)
 		}
 		actor, err := actorcritic.NewActor(params)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, error) {
-			return actor.ActWithInfo(obs, nil, rng)
-		}, nil
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, error) {
+			decision, err := actor.ActWithInfo(obs, nil, rng)
+			return decision, "", err
+		}, noopReset, nil
+	case "hierarchical":
+		meta, subs, _, err := hierarchical.LoadFile(checkpointPath, environmentID, numSubgoals)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading checkpoint: %w", err)
+		}
+		actor, err := hierarchical.NewActor(meta, subs, numSubgoals, subgoalInterval)
+		if err != nil {
+			return nil, nil, err
+		}
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, error) {
+			decision, err := actor.ActWithInfo(obs, rng)
+			if err != nil {
+				return rl.Decision{}, "", err
+			}
+			extra := fmt.Sprintf("subgoal=%d", decision.ActiveSubgoal)
+			if decision.MetaDecisionMade {
+				extra += fmt.Sprintf(" (new, meta-prob=%.3f)", decision.MetaDecision.Probabilities[decision.MetaDecision.Action])
+			}
+			return decision.SubDecision, extra, nil
+		}, actor.Reset, nil
 	default:
-		return nil, fmt.Errorf("unknown -algo %q, want \"reinforce\" or \"ppo\"", algo)
+		return nil, nil, fmt.Errorf("unknown -algo %q, want \"reinforce\", \"ppo\", or \"hierarchical\"", algo)
 	}
 }

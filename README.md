@@ -116,11 +116,11 @@ Run `go run ./cmd/train-hierarchical -h` for the full list of flags. It supports
 
 ## Watch mode
 
-`cmd/watch` loads a checkpoint saved by `cmd/train` or `cmd/train-ppo` and renders one episode of it acting in `pkg/snakeenv`/`pkg/gridworldenv` step by step in the terminal, for eyeballing whether a trained policy behaves sensibly:
+`cmd/watch` loads a checkpoint saved by `cmd/train`, `cmd/train-ppo`, or `cmd/train-hierarchical` and renders one episode of it acting in the corresponding environment step by step in the terminal, for eyeballing whether a trained policy behaves sensibly:
 
 ```sh
 go run ./cmd/train -env=snake -grid-size=36 -epochs=200 -checkpoint-out=checkpoints/reinforce.json
 go run ./cmd/watch -env=snake -algo=reinforce -grid-size=36 -checkpoint=checkpoints/reinforce.json
 ```
 
-Use `-algo=ppo` for a `cmd/train-ppo` checkpoint. `-delay` controls the pause between steps and `-episode-len` caps how long it renders before giving up. `pkg/hierarchical` checkpoints aren't supported yet — see `docs/plans/15-agent-and-training-visualization.md`. Run `go run ./cmd/watch -h` for the full list of flags.
+Use `-algo=ppo` for a `cmd/train-ppo` checkpoint, or `-algo=hierarchical -env=hierarchicalgridworld` (with matching `-num-subgoals`/`-subgoal-interval`) for a `cmd/train-hierarchical` checkpoint — driven by `hierarchical.Actor` (`pkg/hierarchical/actor.go`), which reports the currently-active subgoal and when the meta-controller made a new decision alongside each step. `-delay` controls the pause between steps and `-episode-len` caps how long it renders before giving up. Every mode prints the chosen action's sampled probability (and, where available, a value estimate) via `Actor.ActWithInfo` — see `docs/plans/16-decision-auditing-and-explainability.md`. Run `go run ./cmd/watch -h` for the full list of flags.
