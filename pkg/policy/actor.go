@@ -79,6 +79,30 @@ func (a *Actor) Act(obs rl.Observation, mask []bool, rng *rand.Rand) (rl.Action,
 	return sampleMaskedAction(net.Output.Val, mask, rng)
 }
 
+// ActWithInfo behaves exactly like Act, but returns a full rl.Decision
+// instead of only the sampled rl.Action, exposing the distribution
+// that produced it (both before and after mask) for a caller that
+// wants to audit why a decision was made, not only observe the
+// outcome. Decision.HasValue is always false here: pkg/policy has no
+// critic to report a value estimate from (see pkg/actorcritic.Actor's
+// version of this method for that). See
+// docs/plans/16-decision-auditing-and-explainability.md.
+func (a *Actor) ActWithInfo(obs rl.Observation, mask []bool, rng *rand.Rand) (rl.Decision, error) {
+	net, err := NewInferenceNetwork(a.params.Load())
+	if err != nil {
+		return rl.Decision{}, fmt.Errorf("policy: building inference network: %w", err)
+	}
+
+	copy(net.Input.Val.Data, obs.Values)
+	net.Graph.Forward()
+
+	action, raw, renormalized, err := sampleMaskedActionWithProbabilities(net.Output.Val, mask, rng)
+	if err != nil {
+		return rl.Decision{}, err
+	}
+	return rl.Decision{Action: action, Probabilities: renormalized, RawProbabilities: raw}, nil
+}
+
 // sampleAction and sampleMaskedAction mirror
 // reinforce.SampleAction/reinforce.SampleMaskedAction exactly; see
 // pkg/reinforce/episode.go for the canonical, directly-tested versions
@@ -105,11 +129,26 @@ func sampleAction(probs *mat.Matrix, rng *rand.Rand) rl.Action {
 }
 
 func sampleMaskedAction(probs *mat.Matrix, mask []bool, rng *rand.Rand) (rl.Action, error) {
+	action, _, _, err := sampleMaskedActionWithProbabilities(probs, mask, rng)
+	return action, err
+}
+
+// sampleMaskedActionWithProbabilities mirrors
+// reinforce.SampleMaskedActionWithProbabilities exactly; see
+// pkg/reinforce/episode.go for the canonical, directly-tested version
+// and its documentation. Duplicated here for the same import-cycle
+// reason sampleAction/sampleMaskedAction are (see above): raw is
+// probs's own distribution; renormalized is the distribution actually
+// sampled from. sampleMaskedAction is implemented in terms of this
+// function.
+func sampleMaskedActionWithProbabilities(probs *mat.Matrix, mask []bool, rng *rand.Rand) (action rl.Action, raw []float32, renormalized []float32, err error) {
+	raw = append([]float32(nil), probs.Data...)
+
 	if mask == nil {
-		return sampleAction(probs, rng), nil
+		return sampleAction(probs, rng), raw, raw, nil
 	}
 	if len(mask) != len(probs.Data) {
-		return 0, fmt.Errorf("policy: mask length %d does not match action space %d", len(mask), len(probs.Data))
+		return 0, nil, nil, fmt.Errorf("policy: mask length %d does not match action space %d", len(mask), len(probs.Data))
 	}
 
 	allAllowed := true
@@ -122,25 +161,32 @@ func sampleMaskedAction(probs *mat.Matrix, mask []bool, rng *rand.Rand) (rl.Acti
 		}
 	}
 	if allAllowed {
-		return sampleAction(probs, rng), nil
+		return sampleAction(probs, rng), raw, raw, nil
 	}
 	if maskedSum <= 0 {
-		return 0, fmt.Errorf("policy: no legal action: mask excludes every action with nonzero probability")
+		return 0, nil, nil, fmt.Errorf("policy: no legal action: mask excludes every action with nonzero probability")
 	}
 
+	renormalized = make([]float32, len(probs.Data))
 	sample := rng.Float32()
 
 	var cumulative float32
 	lastAllowed := -1
+	chosen := -1
 	for i, allowed := range mask {
 		if !allowed {
 			continue
 		}
 		lastAllowed = i
-		cumulative += probs.Data[i] / maskedSum
-		if sample <= cumulative {
-			return rl.Action(i), nil
+		p := probs.Data[i] / maskedSum
+		renormalized[i] = p
+		cumulative += p
+		if chosen == -1 && sample <= cumulative {
+			chosen = i
 		}
 	}
-	return rl.Action(lastAllowed), nil
+	if chosen == -1 {
+		chosen = lastAllowed
+	}
+	return rl.Action(chosen), raw, renormalized, nil
 }

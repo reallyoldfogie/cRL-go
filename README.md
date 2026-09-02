@@ -102,7 +102,7 @@ go test -race ./...    # validate the concurrent rollout-collection path
 go run ./cmd/train-ppo -epochs=500 -clip-eps=0.2 -entropy-coef=0.01 -value-coef=0.5 -gae-lambda=0.95 -ppo-epochs=4 -minibatch-size=64
 ```
 
-Run `go run ./cmd/train-ppo -h` for the full list of flags. `pkg/policy`/`pkg/reinforce` (REINFORCE) and `pkg/actorcritic`/`pkg/ppo` (PPO) are independent end to end: separate network types, separate checkpoint formats, and separate `cmd/` binaries, sharing only `pkg/config`'s settings and a handful of algorithm-agnostic helpers (`reinforce.EnvFactory`, `reinforce.SampleAction`/`reinforce.SampleMaskedAction`, `reinforce.WorkerRNG`). Both network types also expose an `Actor` (`policy.Actor`, `actorcritic.Actor`) for making a single live decision outside of training — see `docs/10-live-inference-and-action-masking.md`.
+Run `go run ./cmd/train-ppo -h` for the full list of flags. `pkg/policy`/`pkg/reinforce` (REINFORCE) and `pkg/actorcritic`/`pkg/ppo` (PPO) are independent end to end: separate network types, separate checkpoint formats, and separate `cmd/` binaries, sharing only `pkg/config`'s settings and a handful of algorithm-agnostic helpers (`reinforce.EnvFactory`, `reinforce.SampleAction`/`reinforce.SampleMaskedAction`, `reinforce.WorkerRNG`). Both network types also expose an `Actor` (`policy.Actor`, `actorcritic.Actor`) for making a single live decision outside of training — see `docs/10-live-inference-and-action-masking.md`. `Actor.ActWithInfo` returns a full `rl.Decision` (the sampled action's probability, the distribution before and after any action mask, and a value estimate where available) instead of only the sampled action, for auditing why a decision was made; `cmd/watch` (below) uses it.
 
 ## Hierarchical RL quickstart
 

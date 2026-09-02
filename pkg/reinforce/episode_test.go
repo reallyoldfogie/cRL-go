@@ -85,3 +85,47 @@ func TestSampleMaskedActionRejectsWrongLengthMask(t *testing.T) {
 	_, err := SampleMaskedAction(probs, mask, rand.New(rand.NewPCG(1, 2)))
 	assert.Error(t, err)
 }
+
+func TestSampleMaskedActionWithProbabilitiesMatchesSampleMaskedAction(t *testing.T) {
+	probs := newProbs(0.1, 0.2, 0.3, 0.4)
+	mask := []bool{true, false, true, false}
+
+	for seed := range 20 {
+		want, err := SampleMaskedAction(probs, mask, rand.New(rand.NewPCG(uint64(seed), uint64(seed+1))))
+		require.NoError(t, err)
+
+		got, _, _, err := SampleMaskedActionWithProbabilities(probs, mask, rand.New(rand.NewPCG(uint64(seed), uint64(seed+1))))
+		require.NoError(t, err)
+
+		assert.Equal(t, want, got)
+	}
+}
+
+func TestSampleMaskedActionWithProbabilitiesReturnsRawAndRenormalized(t *testing.T) {
+	probs := newProbs(0.1, 0.2, 0.3, 0.4)
+	mask := []bool{true, false, true, false}
+
+	_, raw, renormalized, err := SampleMaskedActionWithProbabilities(probs, mask, rand.New(rand.NewPCG(1, 2)))
+	require.NoError(t, err)
+
+	assert.Equal(t, []float32{0.1, 0.2, 0.3, 0.4}, raw, "raw must be probs's own distribution, unaffected by mask")
+	assert.Equal(t, []float32{0.25, 0, 0.75, 0}, renormalized, "allowed actions 0 and 2 (0.1, 0.3) renormalize to 0.25/0.75")
+}
+
+func TestSampleMaskedActionWithProbabilitiesNilMaskReturnsSameSliceForRawAndRenormalized(t *testing.T) {
+	probs := newProbs(0.25, 0.25, 0.25, 0.25)
+
+	_, raw, renormalized, err := SampleMaskedActionWithProbabilities(probs, nil, rand.New(rand.NewPCG(1, 2)))
+	require.NoError(t, err)
+
+	assert.Equal(t, probs.Data, raw)
+	assert.Equal(t, raw, renormalized)
+}
+
+func TestSampleMaskedActionWithProbabilitiesRejectsAllFalseMask(t *testing.T) {
+	probs := newProbs(0.25, 0.25, 0.25, 0.25)
+	mask := []bool{false, false, false, false}
+
+	_, _, _, err := SampleMaskedActionWithProbabilities(probs, mask, rand.New(rand.NewPCG(1, 2)))
+	assert.Error(t, err)
+}

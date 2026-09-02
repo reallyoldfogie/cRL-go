@@ -76,16 +76,16 @@ func run(args []string) error {
 	for step := 0; step < *episodeLen; step++ {
 		renderStep(step, render())
 
-		action, err := act(obs, rng)
+		decision, err := act(obs, rng)
 		if err != nil {
 			return err
 		}
 
-		result, err := env.Step(ctx, action)
+		result, err := env.Step(ctx, decision.Action)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("action=%d reward=%.2f\n", action, result.Reward)
+		printDecision(decision, result.Reward)
 		time.Sleep(*delay)
 
 		obs = result.Observation
@@ -97,6 +97,21 @@ func run(args []string) error {
 	}
 	fmt.Printf("Reached -episode-len=%d without the episode ending.\n", *episodeLen)
 	return nil
+}
+
+// printDecision prints the chosen action, the probability it was
+// sampled with (from rl.Decision.Probabilities, see
+// docs/plans/16-decision-auditing-and-explainability.md), the critic's
+// value estimate when the underlying Actor has one, and the reward the
+// environment returned for taking it — a low chosen-action probability
+// signals an undertrained or genuinely ambiguous decision point, not
+// visible from the action/reward alone.
+func printDecision(decision rl.Decision, reward float32) {
+	fmt.Printf("action=%d prob=%.3f", decision.Action, decision.Probabilities[decision.Action])
+	if decision.HasValue {
+		fmt.Printf(" value=%.3f", decision.Value)
+	}
+	fmt.Printf(" reward=%.2f\n", reward)
 }
 
 // renderStep clears the terminal and prints step's number followed by
@@ -141,14 +156,18 @@ func newWatchEnv(envName string, gridSize int, rng *rand.Rand) (rl.Environment, 
 	}
 }
 
-// actFunc samples one action from an observation, matching
-// policy.Actor.Act's and actorcritic.Actor.Act's shared signature
-// (mask is always nil here: watch mode has no legality constraints of
-// its own to enforce).
-type actFunc func(obs rl.Observation, rng *rand.Rand) (rl.Action, error)
+// actFunc samples one decision from an observation, matching
+// policy.Actor.ActWithInfo's and actorcritic.Actor.ActWithInfo's
+// shared signature (mask is always nil here: watch mode has no
+// legality constraints of its own to enforce).
+type actFunc func(obs rl.Observation, rng *rand.Rand) (rl.Decision, error)
 
 // newActFunc loads the checkpoint at checkpointPath as the algorithm
-// named by algo, returning an actFunc that samples from it.
+// named by algo, returning an actFunc that samples from it. It uses
+// ActWithInfo rather than Act so watch mode can display why an action
+// was chosen (its sampled probability, and a value estimate when
+// available), not only which action was chosen — see
+// docs/plans/16-decision-auditing-and-explainability.md.
 func newActFunc(algo, checkpointPath, environmentID string) (actFunc, error) {
 	switch algo {
 	case "reinforce":
@@ -160,8 +179,8 @@ func newActFunc(algo, checkpointPath, environmentID string) (actFunc, error) {
 		if err != nil {
 			return nil, err
 		}
-		return func(obs rl.Observation, rng *rand.Rand) (rl.Action, error) {
-			return actor.Act(obs, nil, rng)
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, error) {
+			return actor.ActWithInfo(obs, nil, rng)
 		}, nil
 	case "ppo":
 		params, _, err := actorcritic.LoadFile(checkpointPath, environmentID)
@@ -172,8 +191,8 @@ func newActFunc(algo, checkpointPath, environmentID string) (actFunc, error) {
 		if err != nil {
 			return nil, err
 		}
-		return func(obs rl.Observation, rng *rand.Rand) (rl.Action, error) {
-			return actor.Act(obs, nil, rng)
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, error) {
+			return actor.ActWithInfo(obs, nil, rng)
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown -algo %q, want \"reinforce\" or \"ppo\"", algo)

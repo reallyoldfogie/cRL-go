@@ -77,3 +77,32 @@ func (a *Actor) Act(obs rl.Observation, mask []bool, rng *rand.Rand) (rl.Action,
 
 	return reinforce.SampleMaskedAction(net.PolicyOutput.Val, mask, rng)
 }
+
+// ActWithInfo behaves exactly like Act, but returns a full rl.Decision
+// instead of only the sampled rl.Action, exposing the distribution
+// that produced it (both before and after mask) and the critic's
+// value estimate for obs (Decision.HasValue is always true here, since
+// every actorcritic.Params has a value head) for a caller that wants
+// to audit why a decision was made, not only observe the outcome. See
+// docs/plans/16-decision-auditing-and-explainability.md.
+func (a *Actor) ActWithInfo(obs rl.Observation, mask []bool, rng *rand.Rand) (rl.Decision, error) {
+	net, err := NewInferenceNetwork(a.params.Load())
+	if err != nil {
+		return rl.Decision{}, fmt.Errorf("actorcritic: building inference network: %w", err)
+	}
+
+	copy(net.Input.Val.Data, obs.Values)
+	net.Graph.Forward()
+
+	action, raw, renormalized, err := reinforce.SampleMaskedActionWithProbabilities(net.PolicyOutput.Val, mask, rng)
+	if err != nil {
+		return rl.Decision{}, err
+	}
+	return rl.Decision{
+		Action:           action,
+		Probabilities:    renormalized,
+		RawProbabilities: raw,
+		Value:            net.ValueOutput.Val.Data[0],
+		HasValue:         true,
+	}, nil
+}

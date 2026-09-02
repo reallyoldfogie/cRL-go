@@ -76,3 +76,31 @@ type Transition struct {
 type Episode struct {
 	Transitions []Transition
 }
+
+// Decision is the result of a policy's action-selection process,
+// exposing the full distribution that produced the sampled Action
+// instead of only the outcome, so a caller can audit why a decision
+// was made rather than only observe what it was. See
+// pkg/policy.Actor.ActWithInfo and pkg/actorcritic.Actor.ActWithInfo,
+// and docs/plans/16-decision-auditing-and-explainability.md.
+type Decision struct {
+	Action Action
+	// Probabilities is the final distribution Action was sampled from:
+	// the policy's own output, renormalized over whatever action mask
+	// (if any) was applied. Its length is always the environment's
+	// ActionSpace(); it sums to 1 over legal actions and is 0
+	// elsewhere.
+	Probabilities []float32
+	// RawProbabilities is the policy's output distribution before any
+	// mask was applied, letting a caller distinguish "confidently chose
+	// this among several legal options" from "only one option was
+	// legal in the first place." Identical to Probabilities when no
+	// mask was given.
+	RawProbabilities []float32
+	// Value is the critic's estimated value of the observation that
+	// produced this Decision. HasValue is false for a policy with no
+	// critic (e.g. pkg/policy.Actor), distinguishing "no value head"
+	// from a genuinely-estimated value of 0.
+	Value    float32
+	HasValue bool
+}

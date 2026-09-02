@@ -69,3 +69,56 @@ func TestNewActorRejectsNilParams(t *testing.T) {
 	_, err := NewActor(nil)
 	assert.Error(t, err)
 }
+
+// TestActorActWithInfoMatchesAct confirms ActWithInfo samples the same
+// action as Act for the same Params, obs, and rng state — the richer
+// return value must not introduce any drift of its own.
+func TestActorActWithInfoMatchesAct(t *testing.T) {
+	params := NewParams(rand.New(rand.NewPCG(41, 42)), 6, 4, 3)
+	obs := testObservation()
+
+	actor, err := NewActor(params)
+	require.NoError(t, err)
+
+	wantAction, err := actor.Act(obs, nil, rand.New(rand.NewPCG(1, 2)))
+	require.NoError(t, err)
+
+	decision, err := actor.ActWithInfo(obs, nil, rand.New(rand.NewPCG(1, 2)))
+	require.NoError(t, err)
+	assert.Equal(t, wantAction, decision.Action)
+}
+
+// TestActorActWithInfoReportsNoValue confirms pkg/policy's Actor, which
+// has no critic, always reports HasValue=false.
+func TestActorActWithInfoReportsNoValue(t *testing.T) {
+	params := NewParams(rand.New(rand.NewPCG(43, 44)), 6, 4, 3)
+	actor, err := NewActor(params)
+	require.NoError(t, err)
+
+	decision, err := actor.ActWithInfo(testObservation(), nil, rand.New(rand.NewPCG(1, 2)))
+	require.NoError(t, err)
+	assert.False(t, decision.HasValue)
+	assert.Equal(t, float32(0), decision.Value)
+}
+
+// TestActorActWithInfoRenormalizesOverMaskedActions confirms
+// Probabilities is renormalized over only the allowed actions, while
+// RawProbabilities preserves the policy's unmasked output.
+func TestActorActWithInfoRenormalizesOverMaskedActions(t *testing.T) {
+	params := NewParams(rand.New(rand.NewPCG(45, 46)), 6, 4, 3)
+	mask := []bool{false, true, false}
+
+	actor, err := NewActor(params)
+	require.NoError(t, err)
+
+	decision, err := actor.ActWithInfo(testObservation(), mask, rand.New(rand.NewPCG(1, 2)))
+	require.NoError(t, err)
+
+	require.Len(t, decision.Probabilities, 3)
+	require.Len(t, decision.RawProbabilities, 3)
+	assert.Equal(t, rl.Action(1), decision.Action)
+	assert.Equal(t, float32(1), decision.Probabilities[1], "the only allowed action must renormalize to probability 1")
+	assert.Equal(t, float32(0), decision.Probabilities[0])
+	assert.Equal(t, float32(0), decision.Probabilities[2])
+	assert.NotEqual(t, decision.Probabilities, decision.RawProbabilities, "raw must reflect the unmasked distribution")
+}

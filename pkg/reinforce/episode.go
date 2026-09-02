@@ -60,11 +60,28 @@ func SampleAction(probs *mat.Matrix, rng *rand.Rand) rl.Action {
 // length, or if it excludes every action with nonzero probability (no
 // legal action to sample).
 func SampleMaskedAction(probs *mat.Matrix, mask []bool, rng *rand.Rand) (rl.Action, error) {
+	action, _, _, err := SampleMaskedActionWithProbabilities(probs, mask, rng)
+	return action, err
+}
+
+// SampleMaskedActionWithProbabilities behaves exactly like
+// SampleMaskedAction (including sampling the same action for the same
+// rng draw, since SampleMaskedAction is implemented in terms of this
+// function), additionally returning the two probability distributions
+// that produced it: raw is probs's own distribution, unmodified by
+// mask; renormalized is the distribution actually sampled from
+// (identical to raw when mask is nil or excludes nothing). This is for
+// callers that want to audit why an action was chosen, not only
+// observe the outcome — see
+// docs/plans/16-decision-auditing-and-explainability.md.
+func SampleMaskedActionWithProbabilities(probs *mat.Matrix, mask []bool, rng *rand.Rand) (action rl.Action, raw []float32, renormalized []float32, err error) {
+	raw = append([]float32(nil), probs.Data...)
+
 	if mask == nil {
-		return SampleAction(probs, rng), nil
+		return SampleAction(probs, rng), raw, raw, nil
 	}
 	if len(mask) != len(probs.Data) {
-		return 0, fmt.Errorf("reinforce: mask length %d does not match action space %d", len(mask), len(probs.Data))
+		return 0, nil, nil, fmt.Errorf("reinforce: mask length %d does not match action space %d", len(mask), len(probs.Data))
 	}
 
 	allAllowed := true
@@ -77,27 +94,34 @@ func SampleMaskedAction(probs *mat.Matrix, mask []bool, rng *rand.Rand) (rl.Acti
 		}
 	}
 	if allAllowed {
-		return SampleAction(probs, rng), nil
+		return SampleAction(probs, rng), raw, raw, nil
 	}
 	if maskedSum <= 0 {
-		return 0, fmt.Errorf("reinforce: no legal action: mask excludes every action with nonzero probability")
+		return 0, nil, nil, fmt.Errorf("reinforce: no legal action: mask excludes every action with nonzero probability")
 	}
 
+	renormalized = make([]float32, len(probs.Data))
 	sample := rng.Float32()
 
 	var cumulative float32
 	lastAllowed := -1
+	chosen := -1
 	for i, allowed := range mask {
 		if !allowed {
 			continue
 		}
 		lastAllowed = i
-		cumulative += probs.Data[i] / maskedSum
-		if sample <= cumulative {
-			return rl.Action(i), nil
+		p := probs.Data[i] / maskedSum
+		renormalized[i] = p
+		cumulative += p
+		if chosen == -1 && sample <= cumulative {
+			chosen = i
 		}
 	}
-	return rl.Action(lastAllowed), nil
+	if chosen == -1 {
+		chosen = lastAllowed
+	}
+	return rl.Action(chosen), raw, renormalized, nil
 }
 
 // computeReturns computes the discounted reward-to-go at every step of
