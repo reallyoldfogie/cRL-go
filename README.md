@@ -11,7 +11,8 @@ A Go reimplementation based on [`harshbhatt7585/cRL`](https://github.com/harshbh
 - An environment-agnostic training core (`pkg/rl`) with two example environments: a grid-foraging environment (`pkg/snakeenv`) and a goal-seeking gridworld (`pkg/gridworldenv`). `rl.Environment.Reset`/`Step` take a `context.Context`, and both `pkg/reinforce.Trainer` and `pkg/ppo.Trainer` can be built with an `EnvFactory` (rebuilt per episode) or a `PersistentEnvFactory` (built once, reused via `Reset` across episodes) for environments that are expensive to construct or need to stay alive across an episode boundary.
 - A REINFORCE trainer (`pkg/reinforce`) with concurrent rollout collection.
 - Config-file + CLI-flag support for hyperparameters (`pkg/config`, `configs/config.json`).
-- Optional per-epoch CSV metrics export (`-metrics-out`, `pkg/metrics`) on every `cmd/train*` binary, and a `cmd/watch` binary that renders a trained checkpoint acting in `pkg/snakeenv`/`pkg/gridworldenv` step by step in the terminal (via a `Render()` method on each environment, built on `pkg/gridrender`) for eyeballing behavior rather than only reading return numbers. `cmd/watch`'s optional `-decision-log-out` writes one `pkg/decisionlog.Record` (observation, full decision distribution, reward, render snapshot) per step as newline-delimited JSON, for later replay or analysis instead of only a live terminal view.
+- Optional per-epoch CSV metrics export (`-metrics-out`, `pkg/metrics`) on every `cmd/train*` binary, and a `cmd/watch` binary that renders a trained checkpoint acting in `pkg/snakeenv`/`pkg/gridworldenv` step by step in the terminal (via a `Render()` method on each environment, built on `pkg/gridrender`), alongside a live decision panel (action-probability bars, value estimate, and a reward-history sparkline) for eyeballing behavior rather than only reading return numbers. `cmd/watch`'s optional `-decision-log-out` writes one `pkg/decisionlog.Record` (observation, full decision distribution, reward, render snapshot) per step as newline-delimited JSON, for later replay or analysis instead of only a live terminal view.
+- `cmd/report` turns a `-metrics-out` CSV into a static, dependency-free HTML page (`pkg/report`) charting every numeric column against epoch, for a shareable, at-a-glance view of a training run. `cmd/replay` writes a static HTML+JS viewer (no server, no network access) that loads a `-decision-log-out` file and steps through it frame by frame — play/pause, scrub, or step one at a time.
 
 See `docs/` for a from-first-principles explanation of the machine learning concepts involved: neural networks and backpropagation (`01`-`02`), REINFORCE and numerical stability (`03`-`04`), actor-critic networks, Generalized Advantage Estimation, PPO's clipped objective, and Adam/minibatch training (`07`-`09`), live inference/action masking (`10`), hierarchical meta-controller/sub-policy training (`11`), and context-aware/long-lived environments (`12`). `docs/05-porting-notes.md` covers every deliberate difference from the original C implementation, and `docs/06-checkpoints-and-auto-resume.md` covers the checkpoint save/resume/inspect workflow.
 
@@ -116,11 +117,33 @@ Run `go run ./cmd/train-hierarchical -h` for the full list of flags. It supports
 
 ## Watch mode
 
-`cmd/watch` loads a checkpoint saved by `cmd/train`, `cmd/train-ppo`, or `cmd/train-hierarchical` and renders one episode of it acting in the corresponding environment step by step in the terminal, for eyeballing whether a trained policy behaves sensibly:
+`cmd/watch` loads a checkpoint saved by `cmd/train`, `cmd/train-ppo`, or `cmd/train-hierarchical` and renders one episode of it acting in the corresponding environment step by step in the terminal, alongside a live decision panel, for eyeballing whether a trained policy behaves sensibly:
 
 ```sh
 go run ./cmd/train -env=snake -grid-size=36 -epochs=200 -checkpoint-out=checkpoints/reinforce.json
 go run ./cmd/watch -env=snake -algo=reinforce -grid-size=36 -checkpoint=checkpoints/reinforce.json
 ```
 
-Use `-algo=ppo` for a `cmd/train-ppo` checkpoint, or `-algo=hierarchical -env=hierarchicalgridworld` (with matching `-num-subgoals`/`-subgoal-interval`) for a `cmd/train-hierarchical` checkpoint — driven by `hierarchical.Actor` (`pkg/hierarchical/actor.go`), which reports the currently-active subgoal and when the meta-controller made a new decision alongside each step. `-delay` controls the pause between steps and `-episode-len` caps how long it renders before giving up. Every mode prints the chosen action's sampled probability (and, where available, a value estimate) via `Actor.ActWithInfo` — see `docs/plans/16-decision-auditing-and-explainability.md`. Add `-decision-log-out=decisions.jsonl` to also write one `pkg/decisionlog.Record` per step (the full decision, reward, render snapshot, and, for `-algo=hierarchical`, the active subgoal and any meta-decision) as newline-delimited JSON, readable back via `decisionlog.ReadAll` for later replay or analysis. Run `go run ./cmd/watch -h` for the full list of flags.
+Use `-algo=ppo` for a `cmd/train-ppo` checkpoint, or `-algo=hierarchical -env=hierarchicalgridworld` (with matching `-num-subgoals`/`-subgoal-interval`) for a `cmd/train-hierarchical` checkpoint — driven by `hierarchical.Actor` (`pkg/hierarchical/actor.go`), which reports the currently-active subgoal and when the meta-controller made a new decision alongside each step. `-delay` controls the pause between steps and `-episode-len` caps how long it renders before giving up. Every mode's decision panel (`cmd/watch/tui.go`) shows a bar for every action's probability (marking the sampled one), a value estimate where available, and a reward-history sparkline, all sourced from `Actor.ActWithInfo`'s full `rl.Decision` — see `docs/plans/16-decision-auditing-and-explainability.md`. Add `-decision-log-out=decisions.jsonl` to also write one `pkg/decisionlog.Record` per step (the full decision, reward, render snapshot, and, for `-algo=hierarchical`, the active subgoal and any meta-decision) as newline-delimited JSON. Run `go run ./cmd/watch -h` for the full list of flags.
+
+## Training report
+
+`cmd/report` reads a CSV written by any `cmd/train*`'s `-metrics-out` flag and writes a static HTML page charting every numeric column against epoch — no server, no external stylesheet/script, so it opens straight from disk with no network access:
+
+```sh
+go run ./cmd/train -env=snake -grid-size=36 -epochs=200 -metrics-out=metrics.csv
+go run ./cmd/report -metrics-in=metrics.csv -out=report.html -title="Snake, 200 epochs"
+```
+
+It charts whatever columns are present (`return_std` for `cmd/train`, `update_count` for `cmd/train-ppo`, `meta_update_count`/`sub_N_updates` for `cmd/train-hierarchical`) rather than assuming any particular one exists.
+
+## Decision replay
+
+`cmd/replay` writes a static HTML+JS viewer (`cmd/replay/replay.html`, embedded into the binary) for a `cmd/watch -decision-log-out` file:
+
+```sh
+go run ./cmd/watch -env=snake -algo=reinforce -grid-size=36 -checkpoint=checkpoints/reinforce.json -decision-log-out=decisions.jsonl
+go run ./cmd/replay -out=replay.html
+```
+
+Open `replay.html` in any browser and load `decisions.jsonl` via its file picker — the file is read entirely client-side (nothing is uploaded), and you can step through the run frame by frame: play/pause, scrub, or step one at a time, seeing the rendered grid, the full action-probability distribution, and any algorithm-specific `Extra` (e.g. the hierarchical case's active subgoal and meta-decisions) alongside each step.

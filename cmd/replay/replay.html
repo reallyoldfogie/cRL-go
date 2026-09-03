@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cRL-go decision replay</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:2rem;background:#fafafa;color:#222}
+  h1{font-size:1.4rem}
+  #controls{margin:1rem 0;display:flex;gap:.5rem;align-items:center;max-width:900px}
+  #controls button{font-size:1rem;padding:.25rem .75rem}
+  #scrub{flex:1}
+  #grid{white-space:pre;font-family:monospace;font-size:16px;background:#fff;border:1px solid #ddd;
+        border-radius:6px;padding:1rem;display:inline-block;min-width:160px;vertical-align:top}
+  #panel{display:flex;gap:2rem;align-items:flex-start;flex-wrap:wrap;margin-top:1rem}
+  .bar-row{display:flex;align-items:center;gap:.4rem;font-family:monospace;font-size:12px;margin-bottom:2px}
+  .bar-label{width:3.5em}
+  .bar-track{background:#eee;width:220px;height:12px;border-radius:3px;overflow:hidden}
+  .bar-fill{background:#2563eb;height:100%}
+  .bar-fill.chosen{background:#16a34a}
+  .bar-pct{width:4em;text-align:right}
+  #info div{margin-bottom:.25rem;font-family:monospace}
+  #extra{white-space:pre;font-family:monospace;font-size:12px;background:#fff;border:1px solid #ddd;
+         border-radius:6px;padding:.5rem;max-width:420px;overflow:auto;max-height:300px}
+</style>
+</head>
+<body>
+<h1>cRL-go decision replay</h1>
+<p>Load a <code>-decision-log-out</code> file written by <code>cmd/watch</code> (newline-delimited JSON,
+one <code>decisionlog.Record</code> per line). Nothing here is uploaded anywhere — the file is read
+entirely in this browser tab.</p>
+<input type="file" id="file" accept=".jsonl,.json,.log,.txt">
+<div id="controls" hidden>
+  <button id="prev" title="Previous step">&#9198; Prev</button>
+  <button id="play" title="Play/Pause">&#9654; Play</button>
+  <button id="next" title="Next step">Next &#9197;</button>
+  <input type="range" id="scrub" min="0" value="0" step="1">
+  <span id="stepLabel"></span>
+</div>
+<div id="panel" hidden>
+  <div id="grid"></div>
+  <div>
+    <div id="info"></div>
+    <h3>Action probabilities</h3>
+    <div id="bars"></div>
+    <h3>Extra</h3>
+    <div id="extra"></div>
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  var records = [];
+  var index = 0;
+  var playing = false;
+  var timer = null;
+
+  var fileInput = document.getElementById("file");
+  var controls = document.getElementById("controls");
+  var panel = document.getElementById("panel");
+  var gridEl = document.getElementById("grid");
+  var infoEl = document.getElementById("info");
+  var barsEl = document.getElementById("bars");
+  var extraEl = document.getElementById("extra");
+  var scrubEl = document.getElementById("scrub");
+  var stepLabelEl = document.getElementById("stepLabel");
+  var playBtn = document.getElementById("play");
+
+  fileInput.addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    if (!file) {
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var lines = String(reader.result).split("\n").filter(function (line) {
+        return line.trim().length > 0;
+      });
+      records = lines.map(function (line) {
+        return JSON.parse(line);
+      });
+      index = 0;
+      scrubEl.max = String(Math.max(records.length - 1, 0));
+      var hasRecords = records.length > 0;
+      controls.hidden = !hasRecords;
+      panel.hidden = !hasRecords;
+      if (hasRecords) {
+        render();
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  function clearChildren(el) {
+    while (el.firstChild) {
+      el.removeChild(el.firstChild);
+    }
+  }
+
+  function addInfoLine(text) {
+    var div = document.createElement("div");
+    div.textContent = text;
+    infoEl.appendChild(div);
+  }
+
+  function render() {
+    if (records.length === 0) {
+      return;
+    }
+    var rec = records[index];
+    scrubEl.value = String(index);
+    stepLabelEl.textContent = "Step " + rec.step + " (" + (index + 1) + " / " + records.length + ")";
+    gridEl.textContent = (rec.render || []).join("\n");
+
+    var decision = rec.decision || {};
+    var probs = decision.probabilities || [];
+    var chosen = decision.action;
+
+    clearChildren(infoEl);
+    addInfoLine("Action: " + chosen);
+    if (probs[chosen] !== undefined) {
+      addInfoLine("Chosen probability: " + (probs[chosen] * 100).toFixed(1) + "%");
+    }
+    if (decision.has_value) {
+      addInfoLine("Value estimate: " + Number(decision.value).toFixed(3));
+    }
+    addInfoLine("Reward: " + rec.reward);
+    addInfoLine("Done: " + rec.done);
+
+    clearChildren(barsEl);
+    probs.forEach(function (p, i) {
+      var row = document.createElement("div");
+      row.className = "bar-row";
+
+      var label = document.createElement("span");
+      label.className = "bar-label";
+      label.textContent = (i === chosen ? "→ " : "  ") + i + ":";
+
+      var track = document.createElement("div");
+      track.className = "bar-track";
+      var fill = document.createElement("div");
+      fill.className = "bar-fill" + (i === chosen ? " chosen" : "");
+      fill.style.width = (Math.max(0, Math.min(1, p)) * 100) + "%";
+      track.appendChild(fill);
+
+      var pct = document.createElement("span");
+      pct.className = "bar-pct";
+      pct.textContent = (p * 100).toFixed(1) + "%";
+
+      row.appendChild(label);
+      row.appendChild(track);
+      row.appendChild(pct);
+      barsEl.appendChild(row);
+    });
+
+    extraEl.textContent = rec.extra ? JSON.stringify(rec.extra, null, 2) : "(none)";
+  }
+
+  function stop() {
+    playing = false;
+    playBtn.textContent = "▶ Play";
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  document.getElementById("prev").addEventListener("click", function () {
+    stop();
+    index = Math.max(0, index - 1);
+    render();
+  });
+  document.getElementById("next").addEventListener("click", function () {
+    stop();
+    index = Math.min(records.length - 1, index + 1);
+    render();
+  });
+  scrubEl.addEventListener("input", function () {
+    stop();
+    index = Number(scrubEl.value);
+    render();
+  });
+  playBtn.addEventListener("click", function () {
+    if (playing) {
+      stop();
+      return;
+    }
+    playing = true;
+    playBtn.textContent = "⏸ Pause";
+    timer = setInterval(function () {
+      if (index >= records.length - 1) {
+        stop();
+        return;
+      }
+      index++;
+      render();
+    }, 300);
+  });
+})();
+</script>
+</body>
+</html>

@@ -87,9 +87,9 @@ func run(args []string) error {
 	}
 	reset()
 
+	var rewardHistory []float32
 	for step := 0; step < *episodeLen; step++ {
 		lines := render()
-		renderStep(step, lines)
 
 		decision, extra, extraFields, err := act(obs, rng)
 		if err != nil {
@@ -100,8 +100,11 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		printDecision(decision, extra, result.Reward)
-		time.Sleep(*delay)
+
+		rewardHistory = append(rewardHistory, result.Reward)
+		if len(rewardHistory) > rewardHistoryLen {
+			rewardHistory = rewardHistory[len(rewardHistory)-rewardHistoryLen:]
+		}
 
 		if decisionLog != nil {
 			if err := decisionLog.Write(decisionlog.Record{
@@ -117,6 +120,9 @@ func run(args []string) error {
 			}
 		}
 
+		printFrame(step, lines, decision, extra, result.Reward, rewardHistory)
+		time.Sleep(*delay)
+
 		obs = result.Observation
 		if result.Done {
 			renderStep(step+1, render())
@@ -128,32 +134,14 @@ func run(args []string) error {
 	return nil
 }
 
-// printDecision prints the chosen action, the probability it was
-// sampled with (from rl.Decision.Probabilities, see
-// docs/plans/16-decision-auditing-and-explainability.md), the critic's
-// value estimate when the underlying Actor has one, any algorithm-
-// specific extra context (e.g. hierarchical.Actor's active subgoal),
-// and the reward the environment returned for taking it — a low
-// chosen-action probability signals an undertrained or genuinely
-// ambiguous decision point, not visible from the action/reward alone.
-func printDecision(decision rl.Decision, extra string, reward float32) {
-	fmt.Printf("action=%d prob=%.3f", decision.Action, decision.Probabilities[decision.Action])
-	if decision.HasValue {
-		fmt.Printf(" value=%.3f", decision.Value)
-	}
-	if extra != "" {
-		fmt.Printf(" %s", extra)
-	}
-	fmt.Printf(" reward=%.2f\n", reward)
-}
-
 // renderStep clears the terminal and prints step's number followed by
-// lines, a rendered environment snapshot (see pkg/gridrender).
+// lines, a rendered environment snapshot (see pkg/gridrender). Used
+// only for the final, decision-less frame after an episode ends;
+// printFrame (tui.go) is used for every other step, alongside a
+// decision panel.
 func renderStep(step int, lines []string) {
 	// ANSI "clear screen, move cursor to top-left" — a plain,
-	// dependency-free way to redraw in place for this first, minimal
-	// "watch mode" (see docs/plans/15-agent-and-training-visualization.md's
-	// options for richer TUI treatments this could grow into later).
+	// dependency-free way to redraw in place.
 	fmt.Print("\033[H\033[2J")
 	fmt.Printf("Step %d\n", step)
 	for _, line := range lines {
