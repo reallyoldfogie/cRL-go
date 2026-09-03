@@ -2,6 +2,7 @@ package hierarchical
 
 import (
 	"context"
+	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -116,4 +117,44 @@ func TestCollectHierarchicalTrajectoryClosesIntervalOnEnvDone(t *testing.T) {
 	require.Len(t, rollout.MetaRollout.Episode.Transitions, 1)
 	assert.Equal(t, float32(1+2), rollout.MetaRollout.Episode.Transitions[0].Reward)
 	assert.True(t, rollout.MetaRollout.Episode.Transitions[0].Done)
+}
+
+// TestCollectHierarchicalTrajectoryRecordsMetaProbabilities confirms
+// MetaProbabilities is populated with one full, valid subgoal
+// distribution per meta-decision — including the final, partial
+// interval left over when episodeLen is exhausted (rollout.go's
+// closeInterval call outside the main loop, the easiest one to
+// accidentally miss) — and that each recorded distribution agrees with
+// the already-trusted scalar LogProbs it was sampled alongside, rather
+// than only checking shapes. See
+// docs/plans/17-meta-decision-distribution-recording.md.
+func TestCollectHierarchicalTrajectoryRecordsMetaProbabilities(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5, 6))
+	cfg := Config{NumSubgoals: 3, SubgoalInterval: 3, MetaHiddenSize: 4, SubHiddenSize: 4, MetaLearningRate: 0.01, SubLearningRate: 0.01}
+	metaParams, subParams := testHierarchicalParams(rng, cfg, 2, 2)
+
+	envFactory := reinforce.EnvFactory(func(rng *rand.Rand) (rl.Environment, error) {
+		return &scriptedRewardEnv{}, nil
+	})
+
+	rollout, err := collectHierarchicalTrajectory(context.Background(), metaParams, subParams, cfg, envFactory, 7, rng)
+	require.NoError(t, err)
+
+	require.Len(t, rollout.MetaRollout.Episode.Transitions, 3, "one entry per meta-decision, including the final partial interval")
+	require.Len(t, rollout.MetaProbabilities, len(rollout.MetaRollout.Episode.Transitions))
+
+	for i, probabilities := range rollout.MetaProbabilities {
+		require.Len(t, probabilities, cfg.NumSubgoals, "meta-decision %d", i)
+
+		var sum float32
+		for _, p := range probabilities {
+			sum += p
+		}
+		assert.InDelta(t, 1.0, sum, 1e-4, "meta-decision %d: distribution must sum to 1", i)
+
+		sampledAction := rollout.MetaRollout.Episode.Transitions[i].Action
+		wantProbability := float32(math.Exp(float64(rollout.MetaRollout.LogProbs[i])))
+		assert.InDelta(t, wantProbability, probabilities[sampledAction], 1e-4,
+			"meta-decision %d: recorded distribution at the sampled action must agree with the existing scalar LogProb", i)
+	}
 }

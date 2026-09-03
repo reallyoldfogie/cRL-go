@@ -33,23 +33,34 @@ const logProbEpsilon float32 = 1e-8
 type HierarchicalRollout struct {
 	MetaRollout *ppo.Rollout
 	SubRollouts map[Subgoal][]*ppo.Rollout
+	// MetaProbabilities is the meta-controller's full, length-NumSubgoals
+	// probability distribution at each meta-decision, index-aligned with
+	// MetaRollout.Episode.Transitions/LogProbs/Values (i.e.
+	// MetaProbabilities[i] is the distribution
+	// MetaRollout.Episode.Transitions[i].Action was sampled from). Kept
+	// here rather than on *ppo.Rollout itself since that type is shared
+	// with flat, non-hierarchical PPO, which has no equivalent use for
+	// it. See docs/plans/17-meta-decision-distribution-recording.md.
+	MetaProbabilities [][]float32
 }
 
 // selectFromNetwork runs one forward pass over obs through net and
 // samples a category from its policy head — whether that category
 // represents a Subgoal (the meta-controller) or a primitive rl.Action
 // (a sub-policy) is entirely up to the caller, since both are scored
-// identically. Returns the sampled index, its log-probability, and the
-// value head's estimate at obs.
-func selectFromNetwork(net *actorcritic.InferenceNetwork, obs rl.Observation, rng *rand.Rand) (index int, logProb, value float32, err error) {
+// identically. Returns the sampled index, its log-probability, the
+// value head's estimate at obs, and the full distribution it was
+// sampled from (an independent copy, safe to keep past the next
+// Graph.Forward() call on net).
+func selectFromNetwork(net *actorcritic.InferenceNetwork, obs rl.Observation, rng *rand.Rand) (index int, logProb, value float32, probabilities []float32, err error) {
 	copy(net.Input.Val.Data, obs.Values)
 	net.Graph.Forward()
 
-	action, err := reinforce.SampleMaskedAction(net.PolicyOutput.Val, nil, rng)
+	action, probabilities, _, err := reinforce.SampleMaskedActionWithProbabilities(net.PolicyOutput.Val, nil, rng)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, nil, err
 	}
-	return int(action), actionLogProb(net.PolicyOutput.Val, action), net.ValueOutput.Val.Data[0], nil
+	return int(action), actionLogProb(net.PolicyOutput.Val, action), net.ValueOutput.Val.Data[0], probabilities, nil
 }
 
 // actionLogProb mirrors pkg/ppo's identically-named, unexported
@@ -65,13 +76,15 @@ func actionLogProb(probs *mat.Matrix, action rl.Action) float32 {
 }
 
 // selectSubgoal runs one forward pass over obs through the
-// meta-controller network and samples a Subgoal.
-func selectSubgoal(net *actorcritic.InferenceNetwork, obs rl.Observation, rng *rand.Rand) (Subgoal, float32, float32, error) {
-	index, logProb, value, err := selectFromNetwork(net, obs, rng)
+// meta-controller network and samples a Subgoal, additionally returning
+// the full subgoal-probability distribution it was sampled from (see
+// HierarchicalRollout.MetaProbabilities).
+func selectSubgoal(net *actorcritic.InferenceNetwork, obs rl.Observation, rng *rand.Rand) (subgoal Subgoal, logProb, value float32, probabilities []float32, err error) {
+	index, logProb, value, probabilities, err := selectFromNetwork(net, obs, rng)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("hierarchical: selecting subgoal: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("hierarchical: selecting subgoal: %w", err)
 	}
-	return Subgoal(index), logProb, value, nil
+	return Subgoal(index), logProb, value, probabilities, nil
 }
 
 // collectHierarchicalTrajectory runs one episode (up to episodeLen
@@ -116,6 +129,7 @@ func collectHierarchicalTrajectory(
 
 	metaEpisode := &rl.Episode{}
 	var metaLogProbs, metaValues []float32
+	var metaProbabilities [][]float32
 	subRollouts := make(map[Subgoal][]*ppo.Rollout, cfg.NumSubgoals)
 
 	// Interval state: which subgoal is active, the meta-decision that
@@ -125,7 +139,7 @@ func collectHierarchicalTrajectory(
 	// closes). These are function-level variables, reassigned (never
 	// redeclared) as each interval closes and the next one begins, so
 	// closeInterval's closure always sees the latest state.
-	activeSubgoal, metaLogProb, metaValue, err := selectSubgoal(metaNet, observation, rng)
+	activeSubgoal, metaLogProb, metaValue, metaProbability, err := selectSubgoal(metaNet, observation, rng)
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +158,7 @@ func collectHierarchicalTrajectory(
 		})
 		metaLogProbs = append(metaLogProbs, metaLogProb)
 		metaValues = append(metaValues, metaValue)
+		metaProbabilities = append(metaProbabilities, metaProbability)
 
 		subRollouts[activeSubgoal] = append(subRollouts[activeSubgoal], &ppo.Rollout{
 			Episode:  segmentEpisode,
@@ -154,7 +169,7 @@ func collectHierarchicalTrajectory(
 
 	for range episodeLen {
 		augmented := augmentObservation(observation, activeSubgoal, cfg.NumSubgoals)
-		actionIndex, subLogProb, subValue, err := selectFromNetwork(subNets[activeSubgoal], augmented, rng)
+		actionIndex, subLogProb, subValue, _, err := selectFromNetwork(subNets[activeSubgoal], augmented, rng)
 		if err != nil {
 			return nil, fmt.Errorf("hierarchical: selecting action: %w", err)
 		}
@@ -188,7 +203,7 @@ func collectHierarchicalTrajectory(
 			closeInterval(false)
 
 			intervalObservation = observation
-			activeSubgoal, metaLogProb, metaValue, err = selectSubgoal(metaNet, intervalObservation, rng)
+			activeSubgoal, metaLogProb, metaValue, metaProbability, err = selectSubgoal(metaNet, intervalObservation, rng)
 			if err != nil {
 				return nil, err
 			}
@@ -209,7 +224,8 @@ func collectHierarchicalTrajectory(
 	}
 
 	return &HierarchicalRollout{
-		MetaRollout: &ppo.Rollout{Episode: metaEpisode, LogProbs: metaLogProbs, Values: metaValues},
-		SubRollouts: subRollouts,
+		MetaRollout:       &ppo.Rollout{Episode: metaEpisode, LogProbs: metaLogProbs, Values: metaValues},
+		SubRollouts:       subRollouts,
+		MetaProbabilities: metaProbabilities,
 	}, nil
 }
