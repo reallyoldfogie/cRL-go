@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
+	"github.com/reallyoldfogie/cRL-go/pkg/decisionlog"
 	"github.com/reallyoldfogie/cRL-go/pkg/gridworldenv"
 	"github.com/reallyoldfogie/cRL-go/pkg/hierarchical"
 	"github.com/reallyoldfogie/cRL-go/pkg/hierarchicalgridworld"
@@ -44,6 +45,7 @@ func run(args []string) error {
 	seed := fs.Uint64("seed", 1, "seed for the environment's own randomness (e.g. food/goal placement) and action sampling")
 	numSubgoals := fs.Int("num-subgoals", 4, "number of subgoals the checkpoint's meta-controller chooses among (only used with -algo=hierarchical; must match the training run's -num-subgoals)")
 	subgoalInterval := fs.Int("subgoal-interval", 8, "environment steps between meta-controller decisions (only used with -algo=hierarchical; must match the training run's -subgoal-interval)")
+	decisionLogOut := fs.String("decision-log-out", "", "optional path to write one pkg/decisionlog.Record per step, as newline-delimited JSON, for later replay/analysis")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -69,6 +71,15 @@ func run(args []string) error {
 		return err
 	}
 
+	var decisionLog *decisionlog.FileWriter
+	if *decisionLogOut != "" {
+		decisionLog, err = decisionlog.NewFileWriter(*decisionLogOut)
+		if err != nil {
+			return err
+		}
+		defer decisionLog.Close()
+	}
+
 	ctx := context.Background()
 	obs, err := env.Reset(ctx)
 	if err != nil {
@@ -77,9 +88,10 @@ func run(args []string) error {
 	reset()
 
 	for step := 0; step < *episodeLen; step++ {
-		renderStep(step, render())
+		lines := render()
+		renderStep(step, lines)
 
-		decision, extra, err := act(obs, rng)
+		decision, extra, extraFields, err := act(obs, rng)
 		if err != nil {
 			return err
 		}
@@ -90,6 +102,20 @@ func run(args []string) error {
 		}
 		printDecision(decision, extra, result.Reward)
 		time.Sleep(*delay)
+
+		if decisionLog != nil {
+			if err := decisionLog.Write(decisionlog.Record{
+				Step:        step,
+				Observation: obs.Values,
+				Decision:    decision,
+				Reward:      result.Reward,
+				Done:        result.Done,
+				Render:      lines,
+				Extra:       extraFields,
+			}); err != nil {
+				return err
+			}
+		}
 
 		obs = result.Observation
 		if result.Done {
@@ -170,12 +196,15 @@ func newWatchEnv(envName string, gridSize int, rng *rand.Rand) (rl.Environment, 
 }
 
 // actFunc samples one decision from an observation, returning the
-// rl.Decision that determined the environment action plus an optional
-// extra line of algorithm-specific context to print alongside it
-// (empty for policy.Actor/actorcritic.Actor; hierarchical.Actor uses
-// it to report the currently-active subgoal and whether a new
-// meta-decision was just made).
-type actFunc func(obs rl.Observation, rng *rand.Rand) (decision rl.Decision, extra string, err error)
+// rl.Decision that determined the environment action; an optional extra
+// line of algorithm-specific context to print alongside it (empty for
+// policy.Actor/actorcritic.Actor; hierarchical.Actor uses it to report
+// the currently-active subgoal and whether a new meta-decision was just
+// made); and the same context as structured data (nil where extra is
+// empty) for decisionlog.Record.Extra, since extra's formatted string
+// can't be losslessly recovered into structured data — see
+// docs/plans/18-shared-decision-logging-format.md.
+type actFunc func(obs rl.Observation, rng *rand.Rand) (decision rl.Decision, extra string, extraFields map[string]any, err error)
 
 // newActFunc loads the checkpoint at checkpointPath as the algorithm
 // named by algo, returning an actFunc that samples from it and a reset
@@ -200,9 +229,9 @@ func newActFunc(algo, checkpointPath, environmentID string, numSubgoals, subgoal
 		if err != nil {
 			return nil, nil, err
 		}
-		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, error) {
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, map[string]any, error) {
 			decision, err := actor.ActWithInfo(obs, nil, rng)
-			return decision, "", err
+			return decision, "", nil, err
 		}, noopReset, nil
 	case "ppo":
 		params, _, err := actorcritic.LoadFile(checkpointPath, environmentID)
@@ -213,9 +242,9 @@ func newActFunc(algo, checkpointPath, environmentID string, numSubgoals, subgoal
 		if err != nil {
 			return nil, nil, err
 		}
-		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, error) {
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, map[string]any, error) {
 			decision, err := actor.ActWithInfo(obs, nil, rng)
-			return decision, "", err
+			return decision, "", nil, err
 		}, noopReset, nil
 	case "hierarchical":
 		meta, subs, _, err := hierarchical.LoadFile(checkpointPath, environmentID, numSubgoals)
@@ -226,16 +255,19 @@ func newActFunc(algo, checkpointPath, environmentID string, numSubgoals, subgoal
 		if err != nil {
 			return nil, nil, err
 		}
-		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, error) {
+		return func(obs rl.Observation, rng *rand.Rand) (rl.Decision, string, map[string]any, error) {
 			decision, err := actor.ActWithInfo(obs, rng)
 			if err != nil {
-				return rl.Decision{}, "", err
+				return rl.Decision{}, "", nil, err
 			}
 			extra := fmt.Sprintf("subgoal=%d", decision.ActiveSubgoal)
+			extraFields := map[string]any{"active_subgoal": int(decision.ActiveSubgoal)}
 			if decision.MetaDecisionMade {
 				extra += fmt.Sprintf(" (new, meta-prob=%.3f)", decision.MetaDecision.Probabilities[decision.MetaDecision.Action])
+				extraFields["meta_decision_made"] = true
+				extraFields["meta_decision"] = decision.MetaDecision
 			}
-			return decision.SubDecision, extra, nil
+			return decision.SubDecision, extra, extraFields, nil
 		}, actor.Reset, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown -algo %q, want \"reinforce\", \"ppo\", or \"hierarchical\"", algo)
