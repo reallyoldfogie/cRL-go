@@ -1,10 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"math"
-	"os"
-
 	"github.com/reallyoldfogie/cRL-go/pkg/checkpoint"
 	"github.com/reallyoldfogie/cRL-go/pkg/hierarchical"
 )
@@ -15,45 +11,24 @@ import (
 const checkpointPrefix = "hierarchical"
 
 // resumeState is what resumeFromCheckpointDir found (or didn't) in a
-// -checkpoint-dir: the loaded meta-controller/sub-policy Initial params
-// (nil meaning "start fresh") and the run-progress counters to continue
-// from.
-type resumeState struct {
-	Initial      *hierarchical.InitialParams
-	StartEpoch   int
-	BestReturn   float32
-	TotalUpdates int
-}
+// -checkpoint-dir: the loaded meta-controller/sub-policy Params (nil if
+// starting fresh) and the run-progress counters to continue from.
+type resumeState = checkpoint.Resumed[*hierarchical.InitialParams]
 
-// resumeFromCheckpointDir looks for the latest checkpoint.Path-named
-// checkpoint in dir and loads it if found, returning a resumeState with
-// Initial nil (meaning "start fresh") if dir is empty or contains no
-// matching checkpoint yet — both are normal, expected states (e.g. the
-// very first run against a new -checkpoint-dir), not errors. It only
-// returns an error if dir contains a checkpoint that fails to load
-// (corrupt file, or an environment/subgoal-count mismatch).
+// resumeFromCheckpointDir looks for the latest checkpoint in dir and
+// loads it if found; see checkpoint.Resume for the fresh-start/error
+// contract. hierarchical.LoadFile's extra numSubgoals argument and its
+// two-value (meta, subs) return, rather than one params value, are why
+// this needs a closure instead of passing hierarchical.LoadFile
+// directly, unlike cmd/train's and cmd/train-ppo's equivalents.
 func resumeFromCheckpointDir(dir, environmentID string, numSubgoals int) (resumeState, error) {
-	fresh := resumeState{BestReturn: float32(math.Inf(-1))}
-	if dir == "" {
-		return fresh, nil
-	}
-
-	latestPath, err := checkpoint.Latest(dir, checkpointPrefix)
-	if err != nil {
-		return fresh, nil
-	}
-
-	meta, subs, metadata, err := hierarchical.LoadFile(latestPath, environmentID, numSubgoals)
-	if err != nil {
-		return resumeState{}, fmt.Errorf("resuming from %s: %w", latestPath, err)
-	}
-
-	return resumeState{
-		Initial:      &hierarchical.InitialParams{Meta: meta, Subs: subs},
-		StartEpoch:   metadata.Epoch + 1,
-		BestReturn:   metadata.BestReturn,
-		TotalUpdates: metadata.TotalUpdates,
-	}, nil
+	return checkpoint.Resume(dir, checkpointPrefix, func(path string) (*hierarchical.InitialParams, checkpoint.Metadata, error) {
+		meta, subs, metadata, err := hierarchical.LoadFile(path, environmentID, numSubgoals)
+		if err != nil {
+			return nil, checkpoint.Metadata{}, err
+		}
+		return &hierarchical.InitialParams{Meta: meta, Subs: subs}, metadata, nil
+	})
 }
 
 // saveCheckpointToDir saves trainer's meta-controller and every
@@ -61,10 +36,8 @@ func resumeFromCheckpointDir(dir, environmentID string, numSubgoals int) (resume
 // run-progress counters) to dir under checkpoint.Path's naming
 // convention for epoch, creating dir first if it doesn't exist yet.
 func saveCheckpointToDir(dir string, trainer *hierarchical.Trainer, environmentID string, epoch int, bestReturn float32, totalUpdates int) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating checkpoint directory %s: %w", dir, err)
-	}
-
 	metadata := checkpoint.Metadata{Epoch: epoch, BestReturn: bestReturn, TotalUpdates: totalUpdates}
-	return trainer.SaveFile(checkpoint.Path(dir, checkpointPrefix, epoch), environmentID, metadata)
+	return checkpoint.Save(dir, checkpointPrefix, epoch, func(path string) error {
+		return trainer.SaveFile(path, environmentID, metadata)
+	})
 }

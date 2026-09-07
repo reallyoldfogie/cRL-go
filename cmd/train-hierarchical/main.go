@@ -87,7 +87,7 @@ func run(args []string) error {
 		return err
 	}
 
-	initial := resume.Initial
+	initial := resume.Params
 	if initial != nil && *checkpointIn != "" {
 		return fmt.Errorf("both -checkpoint-in and an existing checkpoint in -checkpoint-dir were found; use only one to resume from")
 	}

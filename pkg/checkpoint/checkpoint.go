@@ -1,13 +1,19 @@
-// Package checkpoint provides the naming, discovery, and run-progress
-// metadata helpers shared by pkg/policy's and pkg/actorcritic's
-// checkpoint formats: a conventional file name for a checkpoint saved
-// at a given epoch, finding the most recent one in a directory, and the
-// run-progress fields (independent of either format's own
-// schema-version/architecture fields) every checkpoint embeds.
+// Package checkpoint provides the naming, discovery, run-progress
+// metadata, and resume/save orchestration shared by pkg/policy's,
+// pkg/actorcritic's, and pkg/hierarchical's checkpoint formats: a
+// conventional file name for a checkpoint saved at a given epoch,
+// finding the most recent one in a directory, the run-progress fields
+// (independent of any format's own schema-version/architecture fields)
+// every checkpoint embeds, and (see resume.go) the "look for a
+// checkpoint, load it if present, otherwise start fresh" and "create
+// the directory and save" control flow every cmd/train* command needs
+// around whichever format it uses.
 //
-// This package intentionally knows nothing about either checkpoint
-// format's actual weight data; it only deals with file names and the
-// small piece of metadata both formats embed identically.
+// This package intentionally knows nothing about any checkpoint
+// format's actual weight data; it only deals with file names, the
+// small piece of metadata every format embeds identically, and the
+// generic control flow around loading/saving a format-specific params
+// value it's handed via a caller-supplied function.
 package checkpoint
 
 import (
