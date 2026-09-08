@@ -395,3 +395,74 @@ func TestGradientCheckSmallNetworkEndToEnd(t *testing.T) {
 	assertMatricesClose(t, w1.Grad, numericalGradient(w1, loss, graph.Forward), gradCheckTolerance)
 	assertMatricesClose(t, b1.Grad, numericalGradient(b1, loss, graph.Forward), gradCheckTolerance)
 }
+
+// TestGradientCheckSmallNetworkWithEntropyBonusEndToEnd is
+// TestGradientCheckSmallNetworkEndToEnd with an entropy bonus
+// (entropyCoef*sum_a(-probs[a]*log(probs[a]))) subtracted from the
+// REINFORCE loss, matching pkg/policy.NewTrainingNetwork's composition
+// (see that package's buildEntropyBonus) — this is the shape of graph
+// the entropy-regularization fix adds to pkg/reinforce's training
+// network, so this gradient-checks that composition end to end rather
+// than only the entropy terms in isolation.
+func TestGradientCheckSmallNetworkWithEntropyBonusEndToEnd(t *testing.T) {
+	rng := rand.New(rand.NewPCG(43, 47))
+
+	input := NewVar(4, 1, FlagNone)
+	input.Val.FillRand(rng, -1, 1)
+
+	w0 := NewVar(5, 4, FlagRequiresGrad)
+	w0.Val.FillRand(rng, -0.5, 0.5)
+	b0 := NewVar(5, 1, FlagRequiresGrad)
+	b0.Val.FillRand(rng, -0.5, 0.5)
+
+	w1 := NewVar(3, 5, FlagRequiresGrad)
+	w1.Val.FillRand(rng, -0.5, 0.5)
+	b1 := NewVar(3, 1, FlagRequiresGrad)
+	b1.Val.FillRand(rng, -0.5, 0.5)
+
+	advantages := NewVar(3, 1, FlagNone)
+	advantages.Val.FillRand(rng, -1, 1)
+
+	z0, err := MatMul(w0, input)
+	require.NoError(t, err)
+	z0b, err := Add(z0, b0)
+	require.NoError(t, err)
+	a0, err := ReLU(z0b)
+	require.NoError(t, err)
+
+	z1, err := MatMul(w1, a0)
+	require.NoError(t, err)
+	z1b, err := Add(z1, b1)
+	require.NoError(t, err)
+
+	probs, err := Softmax(z1b)
+	require.NoError(t, err)
+
+	reinforceLoss, err := ReinforceLoss(probs, advantages)
+	require.NoError(t, err)
+
+	logProbs, err := Log(probs)
+	require.NoError(t, err)
+	perActionEntropy, err := Mul(probs, logProbs)
+	require.NoError(t, err)
+	positiveEntropy, err := Neg(perActionEntropy)
+	require.NoError(t, err)
+	entropyCoef := mat.New(3, 1)
+	entropyCoef.Fill(0.1)
+	entropyBonus, err := Mul(positiveEntropy, Constant(entropyCoef))
+	require.NoError(t, err)
+	negatedEntropyBonus, err := Neg(entropyBonus)
+	require.NoError(t, err)
+
+	loss, err := Add(reinforceLoss, negatedEntropyBonus)
+	require.NoError(t, err)
+
+	graph := BuildGraph(loss)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, w0.Grad, numericalGradient(w0, loss, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, b0.Grad, numericalGradient(b0, loss, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, w1.Grad, numericalGradient(w1, loss, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, b1.Grad, numericalGradient(b1, loss, graph.Forward), gradCheckTolerance)
+}

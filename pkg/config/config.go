@@ -48,8 +48,8 @@ type Settings struct {
 	// surrogate objective stops rewarding further movement in that
 	// direction.
 	ClipEpsilon float32 `json:"clip_eps"`
-	// EntropyCoef scales the entropy bonus subtracted from pkg/ppo's
-	// loss, encouraging continued exploration.
+	// EntropyCoef scales the entropy bonus subtracted from pkg/ppo's and
+	// pkg/reinforce's loss, encouraging continued exploration.
 	EntropyCoef float32 `json:"entropy_coef"`
 	// ValueCoef scales the value-function squared-error loss relative to
 	// the clipped-surrogate policy loss in pkg/ppo's combined objective.

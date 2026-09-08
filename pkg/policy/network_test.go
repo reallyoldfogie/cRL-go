@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
+	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,7 +86,7 @@ func TestTrainingNetworkAccumulatesGradientsAcrossMultipleBackwardCalls(t *testi
 	rng := rand.New(rand.NewPCG(7, 8))
 	params := NewParams(rng, 6, 4, 3)
 
-	net, err := NewTrainingNetwork(params)
+	net, err := NewTrainingNetwork(params, 0)
 	require.NoError(t, err)
 
 	runOnce := func() {
@@ -126,7 +127,7 @@ func TestApplyGradientStepUpdatesParameters(t *testing.T) {
 	rng := rand.New(rand.NewPCG(9, 10))
 	params := NewParams(rng, 6, 4, 3)
 
-	net, err := NewTrainingNetwork(params)
+	net, err := NewTrainingNetwork(params, 0)
 	require.NoError(t, err)
 
 	before := append([]float32(nil), params.W0.Data...)
@@ -146,10 +147,70 @@ func TestApplyGradientStepUpdatesParameters(t *testing.T) {
 func TestApplyGradientStepNoOpWithZeroSamples(t *testing.T) {
 	rng := rand.New(rand.NewPCG(11, 12))
 	params := NewParams(rng, 6, 4, 3)
-	net, err := NewTrainingNetwork(params)
+	net, err := NewTrainingNetwork(params, 0)
 	require.NoError(t, err)
 
 	before := append([]float32(nil), params.W0.Data...)
 	net.ApplyGradientStep(0.1, 0)
 	assert.Equal(t, before, params.W0.Data)
+}
+
+// TestNewTrainingNetworkZeroEntropyCoefMatchesPlainReinforceLoss confirms
+// entropyCoef 0 leaves the loss (and therefore the gradient) exactly
+// equal to the plain REINFORCE loss with no entropy term at all, not
+// merely close to it — a regression check for NewTrainingNetwork's new
+// entropyCoef parameter, since every pre-existing caller in this
+// package's own tests now passes 0 and must see unchanged behavior.
+func TestNewTrainingNetworkZeroEntropyCoefMatchesPlainReinforceLoss(t *testing.T) {
+	rng := rand.New(rand.NewPCG(101, 102))
+	params := NewParams(rng, 6, 4, 3)
+
+	net, err := NewTrainingNetwork(params, 0)
+	require.NoError(t, err)
+
+	net.Input.Val.FillRand(rng, -1, 1)
+	net.Advantage.Val.Clear()
+	net.Advantage.Val.Data[1] = 0.7
+	net.Graph.Forward()
+
+	plainLoss, err := autograd.ReinforceLoss(net.Output, net.Advantage)
+	require.NoError(t, err)
+	plainGraph := autograd.BuildGraph(plainLoss)
+	plainGraph.Forward()
+
+	assert.Equal(t, plainLoss.Val.Data, net.Loss.Val.Data, "entropyCoef 0 must produce bit-identical loss to the plain REINFORCE loss")
+}
+
+// TestEntropyCoefAffectsLossAndGradient confirms a nonzero entropyCoef
+// actually participates in NewTrainingNetwork's loss and gradient,
+// rather than being silently accepted and ignored — the exact bug this
+// parameter was added to fix (see docs/03-policy-gradients-and-reinforce.md's
+// entropy-bonus section).
+func TestEntropyCoefAffectsLossAndGradient(t *testing.T) {
+	rng := rand.New(rand.NewPCG(103, 104))
+	params := NewParams(rng, 6, 4, 3)
+	input := make([]float32, params.InputSize())
+	for i := range input {
+		input[i] = 0.1
+	}
+
+	runNet := func(entropyCoef float32) *TrainingNetwork {
+		net, err := NewTrainingNetwork(params, entropyCoef)
+		require.NoError(t, err)
+		copy(net.Input.Val.Data, input)
+		net.Advantage.Val.Clear()
+		net.Advantage.Val.Data[1] = 0.7
+		net.ZeroGrad()
+		net.Graph.Forward()
+		net.Graph.Backward()
+		return net
+	}
+
+	withoutEntropy := runNet(0)
+	withEntropy := runNet(0.5)
+
+	assert.NotEqual(t, withoutEntropy.Loss.Val.Data, withEntropy.Loss.Val.Data,
+		"a nonzero entropyCoef must change the computed loss")
+	assert.NotEqual(t, withoutEntropy.params.W2.Grad.Data, withEntropy.params.W2.Grad.Data,
+		"a nonzero entropyCoef must change the gradient reaching the output layer's weights")
 }

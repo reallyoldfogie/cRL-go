@@ -44,7 +44,7 @@ func RegisterFlags(fs *flag.FlagSet) *FlagOverrides {
 	fs.Uint64Var(&o.Seed, "seed", 0, "master RNG seed (overrides config file)")
 	fs.IntVar(&o.Workers, "workers", 0, "number of concurrent rollout workers (overrides config file)")
 	fs.Float64Var(&o.ClipEpsilon, "clip-eps", 0, "PPO probability-ratio clip bound (overrides config file)")
-	fs.Float64Var(&o.EntropyCoef, "entropy-coef", 0, "PPO entropy bonus coefficient (overrides config file)")
+	fs.Float64Var(&o.EntropyCoef, "entropy-coef", 0, "entropy bonus coefficient for pkg/ppo/pkg/reinforce (overrides config file)")
 	fs.Float64Var(&o.ValueCoef, "value-coef", 0, "PPO value-loss coefficient (overrides config file)")
 	fs.Float64Var(&o.GAELambda, "gae-lambda", 0, "GAE lambda parameter (overrides config file)")
 	fs.IntVar(&o.PPOEpochs, "ppo-epochs", 0, "minibatch passes per collected PPO batch (overrides config file)")

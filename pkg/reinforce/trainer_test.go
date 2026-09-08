@@ -76,6 +76,47 @@ func TestRunEpochSmokeTestNoPanicsOrNaNs(t *testing.T) {
 	}
 }
 
+// TestNewWiresEntropyCoefIntoTrainingNetwork confirms settings.EntropyCoef
+// actually reaches the underlying policy.TrainingNetwork rather than
+// being validated by config.Settings and then silently dropped — the
+// exact bug an mc-agent peer session found live (a REINFORCE-trained
+// policy collapsing to a frozen, deterministic distribution after one
+// gradient step, independent of learning rate, because nothing opposed
+// the softmax saturating). Two trainers built from the same Seed start
+// with identical params; only EntropyCoef differs, so their training
+// networks' losses must differ once entropy actually participates.
+func TestNewWiresEntropyCoefIntoTrainingNetwork(t *testing.T) {
+	settingsA := smallTestSettings()
+	settingsA.EntropyCoef = 0
+	trainerA, err := New(settingsA, snakeEnvFactory(settingsA.GridSize), nil)
+	require.NoError(t, err)
+
+	settingsB := smallTestSettings()
+	settingsB.EntropyCoef = 0.5
+	trainerB, err := New(settingsB, snakeEnvFactory(settingsB.GridSize), nil)
+	require.NoError(t, err)
+
+	require.Equal(t, trainerA.params.W0.Data, trainerB.params.W0.Data,
+		"sanity: same Seed must produce identical initial params, so any Loss difference below comes from EntropyCoef alone")
+
+	input := make([]float32, trainerA.network.Input.Val.Rows)
+	for i := range input {
+		input[i] = 0.1
+	}
+	copy(trainerA.network.Input.Val.Data, input)
+	copy(trainerB.network.Input.Val.Data, input)
+	trainerA.network.Advantage.Val.Clear()
+	trainerA.network.Advantage.Val.Data[0] = 0.7
+	trainerB.network.Advantage.Val.Clear()
+	trainerB.network.Advantage.Val.Data[0] = 0.7
+
+	trainerA.network.Graph.Forward()
+	trainerB.network.Graph.Forward()
+
+	assert.NotEqual(t, trainerA.network.Loss.Val.Data, trainerB.network.Loss.Val.Data,
+		"settings.EntropyCoef must actually reach the training network's loss")
+}
+
 func TestRunEpochIsDeterministicForAFixedSeed(t *testing.T) {
 	settings := smallTestSettings()
 

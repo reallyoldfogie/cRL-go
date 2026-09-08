@@ -15,7 +15,7 @@ In this project:
 
 A **policy** is just a rule for choosing actions given a state. This project uses a **stochastic policy**: rather than always picking the single best-looking action, the network outputs a *probability* for every action (via softmax — see `01-neural-networks-and-forward-pass.md`), and an action is *sampled* from that distribution (`SampleAction` in `pkg/reinforce/trajectory.go`).
 
-This matters for **exploration**: early in training, the policy doesn't know which actions are good, so sampling (rather than always taking the current best guess) lets the agent occasionally try different things and discover better strategies. As training progresses and the policy gets more confident, its probability distribution naturally becomes more peaked around the actions it has learned are good.
+This matters for **exploration**: early in training, the policy doesn't know which actions are good, so sampling (rather than always taking the current best guess) lets the agent occasionally try different things and discover better strategies. As training progresses and the policy gets more confident, its probability distribution naturally becomes more peaked around the actions it has learned are good — see "The entropy bonus" below for why that peaking is only safe up to a point, and what keeps it from running away.
 
 ## Reward-to-go: crediting a whole episode's future, not just one step
 
@@ -60,6 +60,14 @@ advantage = (return - batch_mean) / (batch_std + epsilon)
 This is often called **advantage normalization** or **whitening**: it rescales returns so that, within a batch, above-average outcomes get a positive advantage, below-average outcomes get a negative advantage, and the typical magnitude is roughly consistent from batch to batch (which also makes a single learning rate work reasonably well throughout training, even as raw reward magnitudes change).
 
 **This is not the same as actor-critic.** A common, more sophisticated variant of this idea uses a second, separately-trained neural network (a "critic" or "value function") to predict an *expected* return for a given state, and uses `return - predicted_value` as the advantage. This project's baseline is much simpler: a single mean/std computed once per batch, with no separate network. (The original C project's function was named `create_actor_model`, which suggests an actor-critic architecture; this Go port keeps the same simple batch-baseline algorithm but names things to avoid implying a critic network that doesn't exist — see `docs/05-porting-notes.md`.)
+
+## The entropy bonus: a standing incentive to keep exploring
+
+The REINFORCE loss above only ever pushes the probability of the *sampled* action up or down — nothing in it opposes the softmax saturating toward a near-one-hot (effectively deterministic) distribution once the policy becomes confident. That's usually fine in an environment with a rich, varied reward signal, where new experience keeps disturbing the distribution before it fully saturates. But if the policy locks onto a near-deterministic choice — most easily in an environment whose reward is dominated by a repeated, near-constant signal (e.g. a per-step time penalty that barely varies with the action taken) — a saturated softmax's own gradient goes to ~0, so `ApplyGradientStep`'s update collapses to ~0 too, *independent of `learning_rate`*: the policy freezes at that fixed point regardless of how small or large a step size is requested, because there's no meaningful gradient left to take a step with.
+
+`pkg/policy.NewTrainingNetwork`'s `entropyCoef` parameter (wired from `config.Settings.EntropyCoef`) guards against this by subtracting an **entropy bonus** from the loss: `EntropyCoef` times the policy's Shannon entropy, `sum_a(-prob[a] * log(prob[a]))`. Entropy is highest when every action is equally likely and lowest (zero) when the policy is completely certain of one action, so subtracting it from the loss (equivalently, *rewarding* higher entropy) works against collapsing into total certainty before the policy has actually explored enough to know that certainty is warranted — exactly the exploration concern raised above, but now with a standing incentive behind it rather than relying on the reward signal alone to keep disturbing the distribution.
+
+This mirrors `08-ppo-clipped-objective.md`'s identically-motivated entropy bonus for PPO — `pkg/ppo`'s clipped-surrogate objective additionally bounds how far a single step can move the policy, which is a second, independent safeguard PPO has and REINFORCE doesn't; the entropy bonus is what stands in for that here.
 
 ## Putting it together: one training epoch
 

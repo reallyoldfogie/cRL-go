@@ -2,6 +2,7 @@ package policy
 
 import (
 	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
+	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
 
 // paramVars wraps a Params' six matrices as autograd.Var leaves.
@@ -119,7 +120,12 @@ func NewInferenceNetwork(params *Params) (*InferenceNetwork, error) {
 // graph used to compute gradients: its weight/bias Vars alias Params'
 // matrices (see autograd.Parameter) and accumulate gradients into them
 // across repeated Graph.Backward calls, matching model_state's cost_graph
-// in the original C code.
+// in the original C code. Loss also includes an entropy bonus (see
+// buildEntropyBonus) working against premature collapse into a
+// deterministic distribution, the same role it plays in pkg/ppo's loss
+// (see docs/08-ppo-clipped-objective.md) — REINFORCE has no clipping to
+// slow a single large step, so a policy that saturates its softmax has
+// nothing else here to reintroduce exploration.
 type TrainingNetwork struct {
 	Input     *autograd.Var
 	Output    *autograd.Var
@@ -130,8 +136,14 @@ type TrainingNetwork struct {
 	params paramVars
 }
 
-// NewTrainingNetwork builds a TrainingNetwork over params.
-func NewTrainingNetwork(params *Params) (*TrainingNetwork, error) {
+// NewTrainingNetwork builds a TrainingNetwork over params. entropyCoef
+// scales the entropy bonus subtracted from the REINFORCE loss (see
+// buildEntropyBonus); pass 0 to disable it and match this package's
+// pre-entropy-bonus loss exactly (a coefficient of 0 makes every
+// entropy-bonus term and its gradient exactly zero, so the composed
+// graph is mathematically identical to the plain REINFORCE loss, not
+// merely close to it).
+func NewTrainingNetwork(params *Params, entropyCoef float32) (*TrainingNetwork, error) {
 	input := autograd.NewVar(params.InputSize(), 1, autograd.FlagNone)
 
 	pv := paramVars{
@@ -149,7 +161,20 @@ func NewTrainingNetwork(params *Params) (*TrainingNetwork, error) {
 	}
 
 	advantage := autograd.NewVar(params.OutputSize(), 1, autograd.FlagNone)
-	loss, err := autograd.ReinforceLoss(output, advantage)
+	reinforceLoss, err := autograd.ReinforceLoss(output, advantage)
+	if err != nil {
+		return nil, err
+	}
+
+	entropyBonus, err := buildEntropyBonus(output, entropyCoef)
+	if err != nil {
+		return nil, err
+	}
+	negatedEntropyBonus, err := autograd.Neg(entropyBonus)
+	if err != nil {
+		return nil, err
+	}
+	loss, err := autograd.Add(reinforceLoss, negatedEntropyBonus)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +187,38 @@ func NewTrainingNetwork(params *Params) (*TrainingNetwork, error) {
 		Graph:     autograd.BuildGraph(loss),
 		params:    pv,
 	}, nil
+}
+
+// buildEntropyBonus computes entropyCoef * sum_a(-probs[a]*log(probs[a])),
+// i.e. entropyCoef times the policy's Shannon entropy, expressed as a
+// per-action (outputSize, 1) vector whose entries sum (via Backward's
+// implicit-sum trick — see autograd.Graph's doc comment) to that scalar.
+// Mirrors pkg/ppo/loss.go's identically-named function; unlike that one,
+// this recomputes log(probs) itself rather than accepting a caller's
+// copy, since NewTrainingNetwork has no other reason to compute it.
+func buildEntropyBonus(probs *autograd.Var, entropyCoef float32) (*autograd.Var, error) {
+	logProbs, err := autograd.Log(probs)
+	if err != nil {
+		return nil, err
+	}
+	perActionEntropy, err := autograd.Mul(probs, logProbs)
+	if err != nil {
+		return nil, err
+	}
+	positiveEntropy, err := autograd.Neg(perActionEntropy)
+	if err != nil {
+		return nil, err
+	}
+
+	entropyCoefVar := autograd.Constant(filledColumn(probs.Val.Rows, entropyCoef))
+	return autograd.Mul(positiveEntropy, entropyCoefVar)
+}
+
+// filledColumn returns a (rows, 1) matrix with every entry set to value.
+func filledColumn(rows int, value float32) *mat.Matrix {
+	m := mat.New(rows, 1)
+	m.Fill(value)
+	return m
 }
 
 // ZeroGrad clears every parameter's accumulated gradient. Call this once

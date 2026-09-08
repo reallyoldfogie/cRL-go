@@ -47,7 +47,7 @@ func TestSnapshotIsUnaffectedBySubsequentGradientStep(t *testing.T) {
 	// gradient path for an unlucky random seed, unlike W0/B0/W1/B1.
 	before := append([]float32(nil), snapshot.B2.Data...)
 
-	net, err := NewTrainingNetwork(params)
+	net, err := NewTrainingNetwork(params, 0)
 	require.NoError(t, err)
 	applyOneGradientStep(params, net, rng, 0.5)
 
@@ -69,7 +69,7 @@ func TestActorRefreshUpdatesInternalSnapshot(t *testing.T) {
 	// not W0, is used for this comparison.
 	before := append([]float32(nil), actor.params.Load().B2.Data...)
 
-	net, err := NewTrainingNetwork(params)
+	net, err := NewTrainingNetwork(params, 0)
 	require.NoError(t, err)
 	applyOneGradientStep(params, net, rng, 0.5)
 
@@ -102,7 +102,7 @@ func TestParamsSnapshotAndActorAreRaceFreeUnderConcurrentTraining(t *testing.T) 
 	rng := rand.New(rand.NewPCG(71, 72))
 	params := NewParams(rng, 6, 4, 3)
 
-	net, err := NewTrainingNetwork(params)
+	net, err := NewTrainingNetwork(params, 0)
 	require.NoError(t, err)
 
 	actor, err := NewActor(params)

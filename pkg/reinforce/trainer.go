@@ -139,7 +139,7 @@ func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand
 		return nil, err
 	}
 
-	network, err := policy.NewTrainingNetwork(params)
+	network, err := policy.NewTrainingNetwork(params, settings.EntropyCoef)
 	if err != nil {
 		return nil, fmt.Errorf("reinforce: building training network: %w", err)
 	}
