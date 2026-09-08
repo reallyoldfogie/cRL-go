@@ -155,6 +155,42 @@ func TestApplyGradientStepNoOpWithZeroSamples(t *testing.T) {
 	assert.Equal(t, before, params.W0.Data)
 }
 
+func TestGradientNormZeroBeforeAnyBackward(t *testing.T) {
+	rng := rand.New(rand.NewPCG(105, 106))
+	params := NewParams(rng, 6, 4, 3)
+	net, err := NewTrainingNetwork(params, 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, float32(0), net.GradientNorm(), "no Backward call has happened yet, so there is no accumulated gradient")
+}
+
+func TestGradientNormReflectsAccumulatedGradient(t *testing.T) {
+	rng := rand.New(rand.NewPCG(107, 108))
+	params := NewParams(rng, 6, 4, 3)
+	net, err := NewTrainingNetwork(params, 0)
+	require.NoError(t, err)
+
+	net.ZeroGrad()
+	net.Input.Val.FillRand(rng, -1, 1)
+	net.Advantage.Val.Clear()
+	net.Advantage.Val.Data[0] = 1.0
+	net.Graph.Forward()
+	net.Graph.Backward()
+
+	afterOneCall := net.GradientNorm()
+	assert.Greater(t, afterOneCall, float32(0), "a real Backward call must produce a nonzero gradient norm")
+
+	// Repeating the exact same Forward/Backward call (same Input,
+	// same Advantage) accumulates the identical gradient contribution a
+	// second time, so the total must double deterministically — unlike
+	// a second call with a fresh random input, this can't coincidentally
+	// partially cancel, so it's a reliable way to confirm accumulation.
+	net.Graph.Forward()
+	net.Graph.Backward()
+
+	assert.InDelta(t, 2*afterOneCall, net.GradientNorm(), 1e-3, "gradients accumulate (are not reset) across repeated Backward calls")
+}
+
 // TestNewTrainingNetworkZeroEntropyCoefMatchesPlainReinforceLoss confirms
 // entropyCoef 0 leaves the loss (and therefore the gradient) exactly
 // equal to the plain REINFORCE loss with no entropy term at all, not

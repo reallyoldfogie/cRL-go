@@ -76,6 +76,28 @@ func TestRunEpochSmokeTestNoPanicsOrNaNs(t *testing.T) {
 	}
 }
 
+// TestTrainerGradientNormReflectsRunEpoch confirms Trainer.GradientNorm
+// is 0 before any RunEpoch call (nothing accumulated yet) and nonzero
+// after one, exercising the pass-through to policy.TrainingNetwork's own
+// GradientNorm that a caller with no access to Trainer's unexported
+// network field would otherwise have no way to reach — added as a
+// diagnostic for exactly the situation an mc-agent peer session hit: a
+// training run whose observable EpochStats/weights look completely flat,
+// where a caller can now check whether that's a healthy-but-tiny
+// gradient or a genuinely vanished one.
+func TestTrainerGradientNormReflectsRunEpoch(t *testing.T) {
+	settings := smallTestSettings()
+	trainer, err := New(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, float32(0), trainer.GradientNorm(), "no RunEpoch has happened yet")
+
+	_, err = trainer.RunEpoch(context.Background(), 0)
+	require.NoError(t, err)
+
+	assert.Greater(t, trainer.GradientNorm(), float32(0), "RunEpoch must accumulate a nonzero gradient in the normal case")
+}
+
 // TestNewWiresEntropyCoefIntoTrainingNetwork confirms settings.EntropyCoef
 // actually reaches the underlying policy.TrainingNetwork rather than
 // being validated by config.Settings and then silently dropped — the

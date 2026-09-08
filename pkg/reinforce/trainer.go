@@ -184,6 +184,19 @@ func (tr *Trainer) Params() *policy.Params {
 	return tr.params
 }
 
+// GradientNorm returns the L2 norm of every parameter's gradient as
+// accumulated by the most recently completed RunEpoch call (see
+// policy.TrainingNetwork.GradientNorm), for diagnosing a run whose
+// observable behavior (EpochStats.AverageReturn, or a checksum of
+// Params' weights) has gone flat: this distinguishes "the gradient
+// itself has vanished" from "the environment/behavior has converged but
+// training is still nominally alive underneath," which look identical
+// from EpochStats alone. Calling this before the first RunEpoch reports
+// 0 (no gradient has been accumulated yet).
+func (tr *Trainer) GradientNorm() float32 {
+	return tr.network.GradientNorm()
+}
+
 // RunEpoch runs one full training epoch (rollout collection, return/
 // advantage computation, gradient accumulation, and one SGD step) and
 // returns summary statistics. epoch is used only to derive this epoch's

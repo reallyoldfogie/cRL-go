@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"math"
+
 	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
@@ -235,6 +237,16 @@ func (n *TrainingNetwork) ZeroGrad() {
 // action) steps whose gradients were accumulated into this batch, so the
 // effective step is scaled by the *average* gradient per sample rather
 // than the raw sum. If sampleCount is 0, no update is applied.
+//
+// Note for anyone diagnosing a training run that looks stuck: this
+// scales each parameter's Grad in place before subtracting it (rather
+// than computing a separate scaled copy), so a GradientNorm call after
+// ApplyGradientStep reports the *scaled* (already-applied) update's
+// norm, not the raw accumulated gradient's. Since sampleCount is
+// normally the same every epoch for a fixed RolloutSize/EpisodeLen, this
+// scaling is a constant factor across epochs, so GradientNorm still
+// tracks the raw gradient's trend (rising, falling, or flat) faithfully
+// — it just reports a fixed multiple of it, not the unscaled value.
 func (n *TrainingNetwork) ApplyGradientStep(learningRate float32, sampleCount int) {
 	if sampleCount == 0 {
 		return
@@ -245,4 +257,28 @@ func (n *TrainingNetwork) ApplyGradientStep(learningRate float32, sampleCount in
 		p.Grad.Scale(scale)
 		_ = p.Val.Sub(p.Val, p.Grad)
 	}
+}
+
+// GradientNorm returns the L2 norm (sqrt of the sum of squares) of every
+// parameter's currently accumulated gradient, combined into one number
+// — a cheap way for a caller to check whether Backward actually
+// produced a nonzero learning signal, without needing access to any
+// individual parameter's Grad (which TrainingNetwork otherwise keeps
+// unexported). This is aimed at diagnosing a training run whose
+// observable behavior (returns, weight checksums) has gone flat: a
+// genuinely-near-zero GradientNorm across many consecutive epochs points
+// at the gradient itself vanishing (e.g. state aliasing, or per-sample
+// advantages whose per-parameter contributions cancel), which is a
+// different and more fundamental problem than a healthy-but-small
+// gradient simply producing a visually-imperceptible update — see
+// ApplyGradientStep's doc comment for the timing/scaling caveat that
+// matters when interpreting this across a run using it.
+func (n *TrainingNetwork) GradientNorm() float32 {
+	var sumSquares float64
+	for _, p := range n.params.all() {
+		for _, g := range p.Grad.Data {
+			sumSquares += float64(g) * float64(g)
+		}
+	}
+	return float32(math.Sqrt(sumSquares))
 }
