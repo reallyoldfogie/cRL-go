@@ -58,7 +58,12 @@ func collectTrajectoryFromEnv(ctx context.Context, params *policy.Params, env rl
 	episode := &rl.Episode{Transitions: make([]rl.Transition, 0, episodeLen)}
 
 	for range episodeLen {
-		action, err := actor.Act(observation, nil, rng)
+		var mask []bool
+		if masker, ok := env.(rl.ActionMasker); ok {
+			mask = masker.ActionMask()
+		}
+
+		action, err := actor.Act(observation, mask, rng)
 		if err != nil {
 			return nil, fmt.Errorf("reinforce: sampling action: %w", err)
 		}
@@ -73,6 +78,7 @@ func collectTrajectoryFromEnv(ctx context.Context, params *policy.Params, env rl
 			Action:      action,
 			Reward:      result.Reward,
 			Done:        result.Done,
+			Mask:        mask,
 		})
 
 		observation = result.Observation

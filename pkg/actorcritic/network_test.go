@@ -115,6 +115,30 @@ func TestApplyGradientStepNoOpWithZeroSamples(t *testing.T) {
 	assert.Equal(t, before, params.W0.Data)
 }
 
+// TestSetActionMaskZeroesMaskedActionProbability mirrors
+// pkg/policy's test of the same name: a masked action's policy
+// probability comes out exactly 0, and the remaining legal actions
+// still sum to 1 — see docs/plans/19-training-time-action-masking.md.
+func TestSetActionMaskZeroesMaskedActionProbability(t *testing.T) {
+	rng := rand.New(rand.NewPCG(205, 206))
+	params := NewParams(rng, 6, 4, 4)
+
+	net, err := NewTrainingNetwork(params)
+	require.NoError(t, err)
+
+	net.Input.Val.FillRand(rng, -1, 1)
+	net.SetActionMask([]bool{true, false, true, true})
+	autograd.BuildGraphMulti(net.PolicyOutput, net.ValueOutput).Forward()
+
+	assert.Equal(t, float32(0), net.PolicyOutput.Val.Data[1], "a masked action must have exactly 0 probability")
+
+	var sum float32
+	for _, v := range net.PolicyOutput.Val.Data {
+		sum += v
+	}
+	assert.InDelta(t, 1.0, sum, 1e-4)
+}
+
 // --- Gradient checking ---
 //
 // Duplicated from pkg/autograd/gradcheck_test.go's helpers (test files
@@ -173,7 +197,11 @@ func assertMatricesClose(t *testing.T, want, got *mat.Matrix, tolerance float64)
 // TestGradientCheckSoftmax in pkg/autograd/gradcheck_test.go uses),
 // plus the value head's squared error against a fixed target — and
 // gradient-checks every one of the network's eight parameter matrices
-// against it.
+// against it. A third action is masked out via SetActionMask
+// throughout, confirming masking doesn't corrupt the gradient reaching
+// any parameter, including ones feeding the value head that masking
+// isn't even supposed to touch — see
+// docs/plans/19-training-time-action-masking.md.
 //
 // This is deliberately not the real PPO loss (GAE and the
 // clipped-surrogate objective arrive separately); it only needs to
@@ -186,6 +214,7 @@ func TestGradientCheckTrainingNetworkStandInObjective(t *testing.T) {
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)
 	net.Input.Val.FillRand(rng, -1, 1)
+	net.SetActionMask([]bool{true, true, false})
 
 	selectFirstAction := &autograd.Var{Val: &mat.Matrix{Rows: 1, Cols: 3, Data: []float32{1, 0, 0}}}
 	selectedProb, err := autograd.MatMul(selectFirstAction, net.PolicyOutput)

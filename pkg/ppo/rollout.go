@@ -67,7 +67,12 @@ func collectTrajectoryFromEnv(ctx context.Context, params *actorcritic.Params, e
 		copy(net.Input.Val.Data, observation.Values)
 		net.Graph.Forward()
 
-		action, err := reinforce.SampleMaskedAction(net.PolicyOutput.Val, nil, rng)
+		var mask []bool
+		if masker, ok := env.(rl.ActionMasker); ok {
+			mask = masker.ActionMask()
+		}
+
+		action, err := reinforce.SampleMaskedAction(net.PolicyOutput.Val, mask, rng)
 		if err != nil {
 			return nil, fmt.Errorf("ppo: sampling action: %w", err)
 		}
@@ -84,6 +89,7 @@ func collectTrajectoryFromEnv(ctx context.Context, params *actorcritic.Params, e
 			Action:      action,
 			Reward:      result.Reward,
 			Done:        result.Done,
+			Mask:        mask,
 		})
 
 		observation = result.Observation

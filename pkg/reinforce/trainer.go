@@ -331,6 +331,7 @@ func (tr *Trainer) trainOnRollouts(episodes []scoredEpisode, mean, std float32) 
 	for _, s := range episodes {
 		for t, transition := range s.Episode.Transitions {
 			copy(tr.network.Input.Val.Data, transition.Observation.Values)
+			tr.network.SetActionMask(transition.Mask)
 
 			tr.network.Advantage.Val.Clear()
 			advantage := (s.Returns[t] - mean) / (std + advantageEpsilon)

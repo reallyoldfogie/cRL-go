@@ -328,6 +328,7 @@ func (tr *Trainer) trainOnMinibatch(minibatch []trainingStep) {
 
 	for _, step := range minibatch {
 		copy(tr.network.Actor.Input.Val.Data, step.Observation.Values)
+		tr.network.Actor.SetActionMask(step.Mask)
 		tr.network.SetStep(step.Action, step.OldLogProb, step.Advantage, step.Return)
 
 		tr.network.Graph.Forward()
@@ -351,6 +352,7 @@ type scoredRollout struct {
 type trainingStep struct {
 	Observation rl.Observation
 	Action      rl.Action
+	Mask        []bool
 	OldLogProb  float32
 	Advantage   float32
 	Return      float32
@@ -366,6 +368,7 @@ func flattenSteps(scored []scoredRollout) []trainingStep {
 			steps = append(steps, trainingStep{
 				Observation: transition.Observation,
 				Action:      transition.Action,
+				Mask:        transition.Mask,
 				OldLogProb:  s.Rollout.LogProbs[t],
 				Advantage:   s.Advantages[t],
 				Return:      s.Returns[t],

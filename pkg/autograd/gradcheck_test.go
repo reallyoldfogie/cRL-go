@@ -174,6 +174,40 @@ func TestGradientCheckReinforceLoss(t *testing.T) {
 	assertMatricesClose(t, probs.Grad, numericalGradient(probs, out, graph.Forward), gradCheckTolerance)
 }
 
+// TestGradientCheckReinforceLossWithActionMask confirms the masking
+// approach pkg/policy.TrainingNetwork and pkg/actorcritic.TrainingNetwork
+// use — adding a large negative bias to a masked action's pre-softmax
+// logit, rather than renormalizing Softmax's output afterward — produces
+// correct gradients for both the masked action and the surviving legal
+// ones, exercising exactly the Add-then-Softmax-then-ReinforceLoss
+// composition those packages build. See
+// docs/plans/19-training-time-action-masking.md.
+func TestGradientCheckReinforceLossWithActionMask(t *testing.T) {
+	logits := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 3, Cols: 1, Data: []float32{0.4, -0.9, 1.3}}}
+	logits.Grad = mat.New(3, 1)
+
+	// Action 1 is masked out.
+	maskBias := &Var{Val: &mat.Matrix{Rows: 3, Cols: 1, Data: []float32{0, -1e9, 0}}}
+
+	maskedLogits, err := Add(logits, maskBias)
+	require.NoError(t, err)
+
+	probs, err := Softmax(maskedLogits)
+	require.NoError(t, err)
+
+	advantages := &Var{Val: &mat.Matrix{Rows: 3, Cols: 1, Data: []float32{1.0, -2.0, 0.5}}}
+	out, err := ReinforceLoss(probs, advantages)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	require.Equal(t, float32(0), probs.Val.Data[1], "the masked action must have exactly 0 probability")
+
+	graph.Backward()
+
+	assertMatricesClose(t, logits.Grad, numericalGradient(logits, out, graph.Forward), gradCheckTolerance)
+}
+
 func TestGradientCheckMul(t *testing.T) {
 	rng := rand.New(rand.NewPCG(13, 17))
 

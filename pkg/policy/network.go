@@ -60,8 +60,11 @@ func (c *chain) softmax(a *autograd.Var) *autograd.Var {
 }
 
 // buildForward wires up input -> W0,B0 -> ReLU -> W1,B1 -> ReLU -> W2,B2
-// -> Softmax -> output, returning the output Var.
-func buildForward(input *autograd.Var, p paramVars) (*autograd.Var, error) {
+// -> Softmax -> output, returning the output Var. maskBias, when
+// non-nil, is added to the pre-softmax logits before Softmax — see
+// TrainingNetwork.MaskBias's doc comment for why masking happens here
+// rather than by renormalizing Softmax's output afterward.
+func buildForward(input *autograd.Var, p paramVars, maskBias *autograd.Var) (*autograd.Var, error) {
 	c := &chain{}
 
 	z0 := c.matMul(p.W0, input)
@@ -75,7 +78,12 @@ func buildForward(input *autograd.Var, p paramVars) (*autograd.Var, error) {
 	z2 := c.matMul(p.W2, a1)
 	z2b := c.add(z2, p.B2)
 
-	output := c.softmax(z2b)
+	logits := z2b
+	if maskBias != nil {
+		logits = c.add(z2b, maskBias)
+	}
+
+	output := c.softmax(logits)
 	return output, c.err
 }
 
@@ -106,7 +114,7 @@ func NewInferenceNetwork(params *Params) (*InferenceNetwork, error) {
 		B2: autograd.Constant(params.B2),
 	}
 
-	output, err := buildForward(input, pv)
+	output, err := buildForward(input, pv, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -132,8 +140,17 @@ type TrainingNetwork struct {
 	Input     *autograd.Var
 	Output    *autograd.Var
 	Advantage *autograd.Var
-	Loss      *autograd.Var
-	Graph     *autograd.Graph // rooted at Loss; a Forward call also computes Output.
+	// MaskBias is added to the pre-softmax logits every Forward call: 0
+	// for a legal action, maskedActionLogitBias for an illegal one (see
+	// SetActionMask). Masking here, rather than by renormalizing Output
+	// after Softmax, means Output stays "the distribution Action was
+	// actually sampled from" for any mask, so ReinforceLoss's existing
+	// gradient math (which assumes exactly that) needs no changes to
+	// stay correct under masking — see
+	// docs/plans/19-training-time-action-masking.md.
+	MaskBias *autograd.Var
+	Loss     *autograd.Var
+	Graph    *autograd.Graph // rooted at Loss; a Forward call also computes Output.
 
 	params paramVars
 }
@@ -157,7 +174,8 @@ func NewTrainingNetwork(params *Params, entropyCoef float32) (*TrainingNetwork, 
 		B2: autograd.Parameter(params.B2),
 	}
 
-	output, err := buildForward(input, pv)
+	maskBias := autograd.NewVar(params.OutputSize(), 1, autograd.FlagNone)
+	output, err := buildForward(input, pv, maskBias)
 	if err != nil {
 		return nil, err
 	}
@@ -185,10 +203,31 @@ func NewTrainingNetwork(params *Params, entropyCoef float32) (*TrainingNetwork, 
 		Input:     input,
 		Output:    output,
 		Advantage: advantage,
+		MaskBias:  maskBias,
 		Loss:      loss,
 		Graph:     autograd.BuildGraph(loss),
 		params:    pv,
 	}, nil
+}
+
+// maskedActionLogitBias is added to a masked-out action's pre-softmax
+// logit (see SetActionMask): large enough that Softmax's forward pass
+// underflows it to exactly 0 probability in float32, with no separate
+// renormalization step, while its own gradient (and every legal
+// action's) comes out correct via Softmax's ordinary backward pass.
+const maskedActionLogitBias float32 = -1e9
+
+// SetActionMask overwrites MaskBias ahead of one Forward/Backward call:
+// 0 for a legal action, maskedActionLogitBias for an illegal one. A nil
+// mask (or one with every entry true) clears MaskBias entirely,
+// reproducing the network's unmasked behavior exactly.
+func (n *TrainingNetwork) SetActionMask(mask []bool) {
+	n.MaskBias.Val.Clear()
+	for i, allowed := range mask {
+		if !allowed {
+			n.MaskBias.Val.Data[i] = maskedActionLogitBias
+		}
+	}
 }
 
 // buildEntropyBonus computes entropyCoef * sum_a(-probs[a]*log(probs[a])),

@@ -67,6 +67,33 @@ type Transition struct {
 	Action      Action
 	Reward      float32
 	Done        bool
+	// Mask is the ActionMasker legality mask (if any) that was in effect
+	// when Action was sampled for this step — nil if the environment
+	// doesn't implement ActionMasker, or reported every action legal.
+	// Recorded here (rather than recomputed later) because it reflects
+	// environment state at the time of the step, which a later replay
+	// pass (see pkg/reinforce.Trainer.trainOnRollouts,
+	// pkg/ppo.Trainer.trainOnMinibatch) has no other way to reconstruct.
+	Mask []bool
+}
+
+// ActionMasker is optionally implemented by an Environment that can
+// report which of its actions are currently legal, letting a trainer
+// exclude structurally-invalid actions from sampling instead of wasting
+// probability mass on ones that can never produce useful reward (e.g. a
+// Craft action when no craft target is configured). Most environments
+// (snakeenv, gridworldenv) have no such distinction and don't need to
+// implement this.
+//
+// See docs/plans/19-training-time-action-masking.md for the failure
+// mode this exists to prevent and how a mask flows from here through
+// both rollout collection and gradient computation.
+type ActionMasker interface {
+	// ActionMask returns a []bool of length ActionSpace(), true for each
+	// currently-legal action, reflecting state as of the most recent
+	// Reset/Step call. A nil return (or all-true) means no masking is
+	// currently needed.
+	ActionMask() []bool
 }
 
 // Episode is one full trajectory: the ordered sequence of Transitions

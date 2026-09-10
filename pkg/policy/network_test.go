@@ -191,6 +191,60 @@ func TestGradientNormReflectsAccumulatedGradient(t *testing.T) {
 	assert.InDelta(t, 2*afterOneCall, net.GradientNorm(), 1e-3, "gradients accumulate (are not reset) across repeated Backward calls")
 }
 
+// TestSetActionMaskZeroesMaskedActionProbability confirms SetActionMask
+// actually reaches Output: a masked action's probability comes out
+// exactly 0 (not merely small), and the remaining legal actions still
+// sum to 1, matching SampleMaskedAction's renormalization contract even
+// though this masking happens before Softmax rather than after it — see
+// docs/plans/19-training-time-action-masking.md.
+func TestSetActionMaskZeroesMaskedActionProbability(t *testing.T) {
+	rng := rand.New(rand.NewPCG(201, 202))
+	params := NewParams(rng, 6, 4, 4)
+
+	net, err := NewTrainingNetwork(params, 0)
+	require.NoError(t, err)
+
+	net.Input.Val.FillRand(rng, -1, 1)
+	net.SetActionMask([]bool{true, false, true, true})
+	net.Graph.Forward()
+
+	assert.Equal(t, float32(0), net.Output.Val.Data[1], "a masked action must have exactly 0 probability")
+
+	var sum float32
+	for _, v := range net.Output.Val.Data {
+		sum += v
+	}
+	assert.InDelta(t, 1.0, sum, 1e-4)
+}
+
+// TestSetActionMaskNilMatchesUnmasked confirms a nil mask (the default
+// before any SetActionMask call, and what an ActionMasker-less
+// environment produces) leaves Output bit-for-bit identical to a network
+// that never had SetActionMask called at all — the same "nil mask is
+// exactly equivalent to no masking" invariant SampleMaskedAction already
+// guarantees at the sampling layer.
+func TestSetActionMaskNilMatchesUnmasked(t *testing.T) {
+	rng := rand.New(rand.NewPCG(203, 204))
+	params := NewParams(rng, 6, 4, 4)
+	input := make([]float32, params.InputSize())
+	for i := range input {
+		input[i] = 0.3
+	}
+
+	unmasked, err := NewTrainingNetwork(params, 0)
+	require.NoError(t, err)
+	copy(unmasked.Input.Val.Data, input)
+	unmasked.Graph.Forward()
+
+	explicitlyCleared, err := NewTrainingNetwork(params, 0)
+	require.NoError(t, err)
+	copy(explicitlyCleared.Input.Val.Data, input)
+	explicitlyCleared.SetActionMask(nil)
+	explicitlyCleared.Graph.Forward()
+
+	assert.Equal(t, unmasked.Output.Val.Data, explicitlyCleared.Output.Val.Data)
+}
+
 // TestNewTrainingNetworkZeroEntropyCoefMatchesPlainReinforceLoss confirms
 // entropyCoef 0 leaves the loss (and therefore the gradient) exactly
 // equal to the plain REINFORCE loss with no entropy term at all, not

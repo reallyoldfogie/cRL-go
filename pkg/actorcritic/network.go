@@ -61,7 +61,11 @@ func (c *chain) softmax(a *autograd.Var) *autograd.Var {
 // buildForward wires up the shared trunk (input -> W0,B0 -> ReLU ->
 // W1,B1 -> ReLU) and both heads (Wpi,Bpi -> Softmax for the policy
 // output; Wv,Bv for the value output), returning both output Vars.
-func buildForward(input *autograd.Var, p paramVars) (policyOutput, valueOutput *autograd.Var, err error) {
+// policyMaskBias, when non-nil, is added to the policy head's
+// pre-softmax logits before Softmax — see
+// TrainingNetwork.MaskBias's doc comment for why; it never touches the
+// value head.
+func buildForward(input *autograd.Var, p paramVars, policyMaskBias *autograd.Var) (policyOutput, valueOutput *autograd.Var, err error) {
 	c := &chain{}
 
 	z0 := c.matMul(p.W0, input)
@@ -74,7 +78,11 @@ func buildForward(input *autograd.Var, p paramVars) (policyOutput, valueOutput *
 
 	zpi := c.matMul(p.Wpi, a1)
 	zpib := c.add(zpi, p.Bpi)
-	policyOutput = c.softmax(zpib)
+	policyLogits := zpib
+	if policyMaskBias != nil {
+		policyLogits = c.add(zpib, policyMaskBias)
+	}
+	policyOutput = c.softmax(policyLogits)
 
 	zv := c.matMul(p.Wv, a1)
 	valueOutput = c.add(zv, p.Bv)
@@ -112,7 +120,7 @@ func NewInferenceNetwork(params *Params) (*InferenceNetwork, error) {
 		Bv:  autograd.Constant(params.Bv),
 	}
 
-	policyOutput, valueOutput, err := buildForward(input, pv)
+	policyOutput, valueOutput, err := buildForward(input, pv, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +150,15 @@ type TrainingNetwork struct {
 	Input        *autograd.Var
 	PolicyOutput *autograd.Var
 	ValueOutput  *autograd.Var
+	// MaskBias is added to PolicyOutput's pre-softmax logits every
+	// Forward call: 0 for a legal action, maskedActionLogitBias for an
+	// illegal one (see SetActionMask). Masking here, rather than by
+	// renormalizing PolicyOutput after Softmax, means PolicyOutput stays
+	// "the distribution the sampled action actually came from" for any
+	// mask, so a loss built on top of it (e.g. pkg/ppo's) needs no
+	// mask-specific changes to stay correct — see
+	// docs/plans/19-training-time-action-masking.md.
+	MaskBias *autograd.Var
 
 	params paramVars
 }
@@ -161,7 +178,8 @@ func NewTrainingNetwork(params *Params) (*TrainingNetwork, error) {
 		Bv:  autograd.Parameter(params.Bv),
 	}
 
-	policyOutput, valueOutput, err := buildForward(input, pv)
+	maskBias := autograd.NewVar(params.OutputSize(), 1, autograd.FlagNone)
+	policyOutput, valueOutput, err := buildForward(input, pv, maskBias)
 	if err != nil {
 		return nil, err
 	}
@@ -170,8 +188,26 @@ func NewTrainingNetwork(params *Params) (*TrainingNetwork, error) {
 		Input:        input,
 		PolicyOutput: policyOutput,
 		ValueOutput:  valueOutput,
+		MaskBias:     maskBias,
 		params:       pv,
 	}, nil
+}
+
+// maskedActionLogitBias mirrors pkg/policy.TrainingNetwork's constant of
+// the same name and purpose; see SetActionMask.
+const maskedActionLogitBias float32 = -1e9
+
+// SetActionMask overwrites MaskBias ahead of one Forward/Backward call:
+// 0 for a legal action, maskedActionLogitBias for an illegal one. A nil
+// mask (or one with every entry true) clears MaskBias entirely,
+// reproducing the network's unmasked behavior exactly.
+func (n *TrainingNetwork) SetActionMask(mask []bool) {
+	n.MaskBias.Val.Clear()
+	for i, allowed := range mask {
+		if !allowed {
+			n.MaskBias.Val.Data[i] = maskedActionLogitBias
+		}
+	}
 }
 
 // Parameters returns every one of the network's eight trainable weight
