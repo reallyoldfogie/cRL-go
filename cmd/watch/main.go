@@ -239,7 +239,7 @@ func newActFunc(algo, checkpointPath, environmentID string, numSubgoals, subgoal
 		if err != nil {
 			return nil, nil, fmt.Errorf("loading checkpoint: %w", err)
 		}
-		actor, err := hierarchical.NewActor(meta, subs, numSubgoals, subgoalInterval)
+		actor, err := hierarchical.NewActor(meta, subs, subgoalInterval)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -59,9 +59,9 @@ type Actor struct {
 // NewActor builds an Actor from a previously-trained meta-controller
 // and every sub-policy's actorcritic.Params (e.g. from
 // Trainer.Params() or LoadFile), snapshotting each into its own
-// actorcritic.Actor (see actorcritic.NewActor). subParams must have
-// exactly one entry for every Subgoal in [0, numSubgoals).
-func NewActor(metaParams *actorcritic.Params, subParams map[Subgoal]*actorcritic.Params, numSubgoals, subgoalInterval int) (*Actor, error) {
+// actorcritic.Actor (see actorcritic.NewActor).
+func NewActor(metaParams *actorcritic.Params, subParams map[Subgoal]*actorcritic.Params, subgoalInterval int) (*Actor, error) {
+	numSubgoals := len(subParams)
 	if numSubgoals <= 0 {
 		return nil, fmt.Errorf("hierarchical: num_subgoals must be positive, got %d", numSubgoals)
 	}

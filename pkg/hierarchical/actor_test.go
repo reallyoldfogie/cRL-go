@@ -34,7 +34,7 @@ func newTestActorParams(seed uint64) (*actorcritic.Params, map[Subgoal]*actorcri
 func newTestActor(t *testing.T, seed uint64) *Actor {
 	t.Helper()
 	meta, subs := newTestActorParams(seed)
-	actor, err := NewActor(meta, subs, testActorNumSubgoals, testActorSubgoalInterval)
+	actor, err := NewActor(meta, subs, testActorSubgoalInterval)
 	require.NoError(t, err)
 	return actor
 }
@@ -94,15 +94,15 @@ func TestActMatchesActWithInfo(t *testing.T) {
 	}
 }
 
-func TestNewActorRejectsNonPositiveNumSubgoals(t *testing.T) {
-	meta, subs := newTestActorParams(4)
-	_, err := NewActor(meta, subs, 0, testActorSubgoalInterval)
+func TestNewActorRejectsEmptySubParams(t *testing.T) {
+	meta, _ := newTestActorParams(4)
+	_, err := NewActor(meta, map[Subgoal]*actorcritic.Params{}, testActorSubgoalInterval)
 	assert.Error(t, err)
 }
 
 func TestNewActorRejectsNonPositiveSubgoalInterval(t *testing.T) {
 	meta, subs := newTestActorParams(5)
-	_, err := NewActor(meta, subs, testActorNumSubgoals, 0)
+	_, err := NewActor(meta, subs, 0)
 	assert.Error(t, err)
 }
 
@@ -110,6 +110,6 @@ func TestNewActorRejectsMissingSubPolicyParams(t *testing.T) {
 	meta, subs := newTestActorParams(6)
 	delete(subs, Subgoal(0))
 
-	_, err := NewActor(meta, subs, testActorNumSubgoals, testActorSubgoalInterval)
+	_, err := NewActor(meta, subs, testActorSubgoalInterval)
 	assert.Error(t, err)
 }
