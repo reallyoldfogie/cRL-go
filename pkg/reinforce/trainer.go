@@ -46,8 +46,20 @@ type Trainer struct {
 	// once (via NewWithPersistentEnv) instead of per-episode via
 	// envFactory; its presence is what collectRollouts uses to choose
 	// collectRolloutsSequential over collectRolloutsParallel. Exactly
-	// one of envFactory/persistentEnv is set, never both.
+	// one of envFactory/persistentEnv/persistentEnvs is set, never more
+	// than one.
 	persistentEnv rl.Environment
+
+	// persistentEnvs, when non-empty, is a pool of N long-lived
+	// environments (built once, via NewWithPersistentEnvPool), each
+	// reused across many episodes via Reset and driven concurrently with
+	// each other — but never touched by more than one goroutine at a
+	// time (see collectRolloutsPool). Its presence is what
+	// collectRollouts uses to choose collectRolloutsPool over the other
+	// two collection strategies. Exactly one of
+	// envFactory/persistentEnv/persistentEnvs is set, never more than
+	// one.
+	persistentEnvs []rl.Environment
 
 	params  *policy.Params
 	network *policy.TrainingNetwork
@@ -122,6 +134,46 @@ func NewWithPersistentEnv(settings config.Settings, persistentFactory Persistent
 		return nil, err
 	}
 	trainer.persistentEnv = env
+	return trainer, nil
+}
+
+// NewWithPersistentEnvPool constructs a Trainer exactly like
+// NewWithPersistentEnv, except it drives N already-constructed,
+// long-lived environments (envs) concurrently with each other instead
+// of exactly one sequentially. Each envs[i] is Reset and stepped by
+// exactly one goroutine for its entire lifetime — see
+// collectRolloutsPool — so envs must not be shared with any other
+// caller. Concurrency is bounded to len(envs), not settings.Workers:
+// settings.Workers sizes a generic CPU-bound goroutine pool appropriate
+// for cheap, freely-constructible environments (see
+// collectRolloutsParallel), which has no relationship to how many real,
+// expensive, already-connected sessions envs actually contains — using
+// settings.Workers here would either under-use available envs
+// (Workers < len(envs)) or require sharing one envs[i] across multiple
+// concurrent goroutines (Workers > len(envs)), which rl.Environment's
+// own doc comment does not promise is safe. settings.Workers is simply
+// unused on this path, exactly as it already is for
+// NewWithPersistentEnv.
+//
+// Callers own envs' lifecycle (construction and eventual teardown, if
+// applicable) before and after this Trainer's use of them; this
+// constructor and the Trainer it returns never construct or close an
+// environment themselves.
+func NewWithPersistentEnvPool(settings config.Settings, envs []rl.Environment, initialParams *policy.Params) (*Trainer, error) {
+	if len(envs) == 0 {
+		return nil, fmt.Errorf("reinforce: envs must contain at least one environment")
+	}
+	if err := settings.Validate(); err != nil {
+		return nil, err
+	}
+
+	initRNG := rand.New(rand.NewPCG(settings.Seed, settings.Seed))
+
+	trainer, err := newTrainer(settings, envs[0], initRNG, initialParams)
+	if err != nil {
+		return nil, err
+	}
+	trainer.persistentEnvs = envs
 	return trainer, nil
 }
 
@@ -248,10 +300,14 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 }
 
 // collectRollouts collects settings.RolloutSize episodes for this
-// epoch, dispatching to collectRolloutsSequential if tr was built via
-// NewWithPersistentEnv, or collectRolloutsParallel (the original,
+// epoch, dispatching to collectRolloutsPool if tr was built via
+// NewWithPersistentEnvPool, collectRolloutsSequential if tr was built
+// via NewWithPersistentEnv, or collectRolloutsParallel (the original,
 // per-episode-construction path) otherwise.
 func (tr *Trainer) collectRollouts(ctx context.Context, epoch int) ([]*rl.Episode, error) {
+	if len(tr.persistentEnvs) > 0 {
+		return tr.collectRolloutsPool(ctx, epoch)
+	}
 	if tr.persistentEnv != nil {
 		return tr.collectRolloutsSequential(ctx, epoch)
 	}
@@ -312,6 +368,54 @@ func (tr *Trainer) collectRolloutsSequential(ctx context.Context, epoch int) ([]
 			return nil, err
 		}
 		episodes[i] = episode
+	}
+	return episodes, nil
+}
+
+// collectRolloutsPool collects settings.RolloutSize episodes across
+// tr.persistentEnvs, bounded to exactly len(tr.persistentEnvs)
+// concurrent goroutines — one per pooled environment, for the
+// goroutine's entire lifetime, never shared — rather than
+// settings.Workers (see NewWithPersistentEnvPool's own doc comment for
+// why). Episode indices are striped across workers (worker, worker+n,
+// worker+2n, ...) so every episode still gets its own deterministic
+// WorkerRNG(settings.Seed, epoch, i) exactly as
+// collectRolloutsParallel/collectRolloutsSequential already do — i is
+// the global episode index, not a per-worker-local one, so a fixed seed
+// continues to reproduce the same set of episode streams regardless of
+// how many envs the pool contains or how work happens to interleave
+// across them. A worker stops (recording its own error) at its own
+// first error rather than continuing to its next striped episode
+// against a session that just failed, mirroring
+// collectRolloutsSequential's own early-return-on-error behavior.
+func (tr *Trainer) collectRolloutsPool(ctx context.Context, epoch int) ([]*rl.Episode, error) {
+	n := len(tr.persistentEnvs)
+	episodes := make([]*rl.Episode, tr.settings.RolloutSize)
+	errs := make([]error, tr.settings.RolloutSize)
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < n; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			env := tr.persistentEnvs[worker]
+			for i := worker; i < tr.settings.RolloutSize; i += n {
+				rng := WorkerRNG(tr.settings.Seed, epoch, i)
+				episode, err := collectTrajectoryFromEnv(ctx, tr.params, env, tr.settings.EpisodeLen, rng)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				episodes[i] = episode
+			}
+		}(worker)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
 	}
 	return episodes, nil
 }
