@@ -78,6 +78,58 @@ func TestSampleMaskedActionRejectsAllFalseMask(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestSampleMaskedActionFallsBackToUniformWhenAllowedProbabilityUnderflows
+// exercises the live-confirmed 2026-09-18 crash this guards against: mask
+// allows one action whose own probability is exactly 0 (simulating a
+// float32 softmax underflow, not a genuine zero-probability policy
+// decision) alongside disallowed actions with real probability mass —
+// SampleMaskedAction must return that allowed action rather than erroring,
+// since it is mathematically the only legal choice regardless of how
+// small (unrepresentably small, even) the policy's real preference for it
+// is.
+func TestSampleMaskedActionFallsBackToUniformWhenAllowedProbabilityUnderflows(t *testing.T) {
+	probs := newProbs(0, 0.4, 0.6, 0)
+	mask := []bool{true, false, false, false}
+
+	action, err := SampleMaskedAction(probs, mask, rand.New(rand.NewPCG(1, 2)))
+	require.NoError(t, err)
+	assert.Equal(t, rl.Action(0), action)
+}
+
+// TestSampleMaskedActionFallsBackToUniformAmongSeveralUnderflowedActions
+// is the same scenario with more than one allowed action, confirming the
+// fallback distribution is uniform among all of them (not just the
+// first) by checking every seed in a wide range lands on an allowed
+// index.
+func TestSampleMaskedActionFallsBackToUniformAmongSeveralUnderflowedActions(t *testing.T) {
+	probs := newProbs(0, 0, 0.5, 0.5)
+	mask := []bool{true, true, false, false}
+
+	seen := map[rl.Action]bool{}
+	for seed := range uint64(50) {
+		action, err := SampleMaskedAction(probs, mask, rand.New(rand.NewPCG(seed, 0)))
+		require.NoError(t, err)
+		if action != 0 && action != 1 {
+			t.Fatalf("action %d is not allowed by mask %v", action, mask)
+		}
+		seen[action] = true
+	}
+	assert.Len(t, seen, 2, "expected both allowed actions to be sampled across 50 seeds")
+}
+
+// TestSampleMaskedActionStillRejectsAllFalseMask confirms the new
+// anyAllowed check didn't loosen the genuine "mask is entirely false"
+// caller-error case TestSampleMaskedActionRejectsAllFalseMask already
+// covers — kept as its own test, named to make the distinction from the
+// underflow-fallback tests above explicit.
+func TestSampleMaskedActionStillRejectsAllFalseMask(t *testing.T) {
+	probs := newProbs(0.25, 0.25, 0.25, 0.25)
+	mask := []bool{false, false, false, false}
+
+	_, err := SampleMaskedAction(probs, mask, rand.New(rand.NewPCG(1, 2)))
+	assert.Error(t, err)
+}
+
 func TestSampleMaskedActionRejectsWrongLengthMask(t *testing.T) {
 	probs := newProbs(0.5, 0.5)
 	mask := []bool{true, true, true}

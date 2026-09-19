@@ -85,9 +85,11 @@ func SampleMaskedActionWithProbabilities(probs *mat.Matrix, mask []bool, rng *ra
 	}
 
 	allAllowed := true
+	anyAllowed := false
 	var maskedSum float32
 	for i, allowed := range mask {
 		if allowed {
+			anyAllowed = true
 			maskedSum += probs.Data[i]
 		} else {
 			allAllowed = false
@@ -96,8 +98,28 @@ func SampleMaskedActionWithProbabilities(probs *mat.Matrix, mask []bool, rng *ra
 	if allAllowed {
 		return SampleAction(probs, rng), raw, raw, nil
 	}
+	if !anyAllowed {
+		return 0, nil, nil, fmt.Errorf("reinforce: no legal action: mask excludes every action")
+	}
 	if maskedSum <= 0 {
-		return 0, nil, nil, fmt.Errorf("reinforce: no legal action: mask excludes every action with nonzero probability")
+		// mask allows at least one action, but every allowed action's own
+		// probability underflowed to exactly 0 in float32 — softmax's
+		// output is analytically always >0, so this is a representation
+		// limit, not evidence the policy truly assigns zero probability
+		// to every legal action. Live-confirmed (2026-09-18): an
+		// early-training policy that has strongly learned to disfavor one
+		// action from heavy same-task experience (e.g. Wait, rarely
+		// useful across many GoTo-task episodes) can push that action's
+		// logit far enough below the others that its masked-softmax
+		// probability underflows exactly when it's transiently the
+		// *only* legal action (e.g. a Mine/Craft episode's opening
+		// steps, before its target becomes visible/ready — see
+		// mc-agent's rlenv.Environment.actionLegal). Falling back to a
+		// uniform draw among the allowed actions keeps training running
+		// instead of crashing the whole process over what the policy
+		// itself would, at full float32 precision, still consider
+		// possible.
+		return sampleUniformAmongAllowed(mask, raw, rng)
 	}
 
 	renormalized = make([]float32, len(probs.Data))
@@ -122,6 +144,44 @@ func SampleMaskedActionWithProbabilities(probs *mat.Matrix, mask []bool, rng *ra
 		chosen = lastAllowed
 	}
 	return rl.Action(chosen), raw, renormalized, nil
+}
+
+// sampleUniformAmongAllowed draws uniformly among mask's allowed indices
+// — used by SampleMaskedActionWithProbabilities when every allowed
+// action's own probability underflowed to exactly 0 (see its own doc
+// comment on that branch for why uniform, rather than raw, is the right
+// fallback distribution). mask must have at least one true entry (the
+// caller already checked this).
+func sampleUniformAmongAllowed(mask []bool, raw []float32, rng *rand.Rand) (rl.Action, []float32, []float32, error) {
+	count := 0
+	for _, allowed := range mask {
+		if allowed {
+			count++
+		}
+	}
+
+	renormalized := make([]float32, len(mask))
+	uniform := float32(1) / float32(count)
+	for i, allowed := range mask {
+		if allowed {
+			renormalized[i] = uniform
+		}
+	}
+
+	target := rng.IntN(count)
+	seen := 0
+	for i, allowed := range mask {
+		if !allowed {
+			continue
+		}
+		if seen == target {
+			return rl.Action(i), raw, renormalized, nil
+		}
+		seen++
+	}
+	// Unreachable: target < count, and the loop above visits exactly
+	// count allowed indices.
+	panic("reinforce: sampleUniformAmongAllowed: unreachable")
 }
 
 // computeReturns computes the discounted reward-to-go at every step of
