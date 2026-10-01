@@ -38,17 +38,50 @@ const (
 // too-aggressive fixed step size.
 type Adam struct {
 	learningRate float32
-	parameters   []*autograd.Var
-	moment1      []*mat.Matrix // first-moment (mean) estimate, one per parameter
-	moment2      []*mat.Matrix // second-moment (uncentered variance) estimate, one per parameter
-	stepCount    int
+	// maxGradNorm, when > 0, is the max L2 norm Step rescales the whole
+	// averaged-gradient vector (across every parameter together, not
+	// per-parameter) down to before applying it. 0 disables clipping,
+	// matching every existing NewAdam caller's prior behavior exactly.
+	maxGradNorm float32
+	parameters  []*autograd.Var
+	moment1     []*mat.Matrix // first-moment (mean) estimate, one per parameter
+	moment2     []*mat.Matrix // second-moment (uncentered variance) estimate, one per parameter
+	stepCount   int
 }
 
 // NewAdam builds an Adam optimizer for parameters (e.g.
 // actor.Parameters()), with moment estimates initialized to zero
-// (matching the reference algorithm's initialization) and
-// learningRate as the fixed base step size.
+// (matching the reference algorithm's initialization), learningRate as
+// the fixed base step size, and no gradient-norm clipping — see
+// NewAdamWithGradClip for that.
 func NewAdam(parameters []*autograd.Var, learningRate float32) *Adam {
+	return NewAdamWithGradClip(parameters, learningRate, 0)
+}
+
+// NewAdamWithGradClip builds an Adam optimizer exactly like NewAdam, but
+// Step additionally rescales the whole averaged-gradient vector (its L2
+// norm across every parameter together) down to at most maxGradNorm
+// before applying it, whenever maxGradNorm > 0 - the standard PPO
+// stability guard (OpenAI Baselines, Stable-Baselines3 and CleanRL all
+// default max_grad_norm to 0.5) this package was missing. Adam's own
+// per-parameter adaptive scaling bounds an individual parameter's
+// *step size* to roughly learningRate once its moment estimates have
+// settled, but nothing bounded the raw gradient *magnitude* feeding
+// into that: pkg/ppo's clipped-surrogate ratio only limits how far the
+// policy is allowed to move once probabilities have already shifted,
+// and normalizeAdvantages only rescales advantages per-batch, so a
+// batch whose minibatches happen to disagree sharply (high per-step
+// variance even after that normalization) can still sum to an outsized
+// gradient — and moment2's slow-moving (beta2=0.999) EMA under-reacts to
+// it for several Step calls, during which the oversized update applies
+// at close to its raw, un-adapted scale. Found live: PPO rounds with
+// properly normalized advantages and correctly clipped ratios still
+// collapsed from a healthy ~30 return to catastrophically negative
+// within a handful of late-training epochs — independent of
+// entropy_coef (reproduced identically at 0.01, 0.02 and 0.05) —
+// episode lengths collapsing at the same moment as the broken policy
+// started failing fast.
+func NewAdamWithGradClip(parameters []*autograd.Var, learningRate, maxGradNorm float32) *Adam {
 	moment1 := make([]*mat.Matrix, len(parameters))
 	moment2 := make([]*mat.Matrix, len(parameters))
 	for i, p := range parameters {
@@ -58,6 +91,7 @@ func NewAdam(parameters []*autograd.Var, learningRate float32) *Adam {
 
 	return &Adam{
 		learningRate: learningRate,
+		maxGradNorm:  maxGradNorm,
 		parameters:   parameters,
 		moment1:      moment1,
 		moment2:      moment2,
@@ -83,12 +117,17 @@ func (a *Adam) Step(sampleCount int) {
 	beta1Correction := 1 - float32(math.Pow(float64(beta1), float64(a.stepCount)))
 	beta2Correction := 1 - float32(math.Pow(float64(beta2), float64(a.stepCount)))
 
+	gradScale := 1 / float32(sampleCount)
+	if a.maxGradNorm > 0 {
+		gradScale *= a.clipScale(gradScale)
+	}
+
 	for i, p := range a.parameters {
 		moment1 := a.moment1[i]
 		moment2 := a.moment2[i]
 
 		for j := range p.Val.Data {
-			gradient := p.Grad.Data[j] / float32(sampleCount)
+			gradient := p.Grad.Data[j] * gradScale
 
 			moment1.Data[j] = beta1*moment1.Data[j] + (1-beta1)*gradient
 			moment2.Data[j] = beta2*moment2.Data[j] + (1-beta2)*gradient*gradient
@@ -99,4 +138,25 @@ func (a *Adam) Step(sampleCount int) {
 			p.Val.Data[j] -= a.learningRate * moment1Hat / (float32(math.Sqrt(float64(moment2Hat))) + epsilon)
 		}
 	}
+}
+
+// clipScale returns the additional factor (<=1; 1 if already within
+// bounds) Step must multiply preScale by so the L2 norm of the
+// resulting gradient, summed across every parameter together, is at
+// most a.maxGradNorm. preScale is whatever Step has already applied
+// (sampleCount's averaging) before this call, so the norm this computes
+// matches the gradient Step is actually about to apply.
+func (a *Adam) clipScale(preScale float32) float32 {
+	var sumSquares float64
+	for _, p := range a.parameters {
+		for _, g := range p.Grad.Data {
+			scaled := float64(g * preScale)
+			sumSquares += scaled * scaled
+		}
+	}
+	norm := float32(math.Sqrt(sumSquares))
+	if norm <= a.maxGradNorm || norm == 0 {
+		return 1
+	}
+	return a.maxGradNorm / norm
 }

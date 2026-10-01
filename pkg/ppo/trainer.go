@@ -190,7 +190,7 @@ func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand
 		settings: settings,
 		params:   params,
 		network:  network,
-		adam:     actorcritic.NewAdam(network.Actor.Parameters(), settings.LearningRate),
+		adam:     actorcritic.NewAdamWithGradClip(network.Actor.Parameters(), settings.LearningRate, settings.MaxGradNorm),
 	}, nil
 }
 

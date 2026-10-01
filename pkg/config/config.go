@@ -65,6 +65,15 @@ type Settings struct {
 	// MinibatchSize is the number of individual (observation, action,
 	// ...) steps pkg/ppo's trainer includes in each Adam update.
 	MinibatchSize int `json:"minibatch_size"`
+	// MaxGradNorm is the max L2 norm (across every parameter together)
+	// pkg/ppo's trainer rescales each minibatch's averaged gradient down
+	// to before applying it via actorcritic.NewAdamWithGradClip; 0
+	// disables clipping. See that function's own doc comment for why
+	// this matters: neither the clipped-surrogate ratio nor advantage
+	// normalization bounds the raw gradient magnitude a rare
+	// high-variance minibatch can produce, and Adam's own per-parameter
+	// adaptive scaling only catches up to it gradually.
+	MaxGradNorm float32 `json:"max_grad_norm"`
 }
 
 // Default returns the out-of-the-box hyperparameters, matching the
@@ -87,6 +96,7 @@ func Default() Settings {
 		GAELambda:     0.95,
 		PPOEpochs:     4,
 		MinibatchSize: 64,
+		MaxGradNorm:   0.5,
 	}
 }
 
@@ -145,6 +155,9 @@ func (s Settings) Validate() error {
 	}
 	if s.MinibatchSize <= 0 {
 		return fmt.Errorf("config: minibatch_size must be positive, got %d", s.MinibatchSize)
+	}
+	if s.MaxGradNorm < 0 {
+		return fmt.Errorf("config: max_grad_norm must not be negative, got %g", s.MaxGradNorm)
 	}
 	return nil
 }
