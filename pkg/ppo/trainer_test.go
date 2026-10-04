@@ -95,7 +95,7 @@ func TestNewUsesProvidedInitialParams(t *testing.T) {
 	settings := smallTestSettings()
 
 	rng := rand.New(rand.NewPCG(99, 99))
-	initialParams := actorcritic.NewParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions)
+	initialParams := actorcritic.NewParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions, 2)
 
 	trainer, err := New(settings, snakeEnvFactory(settings.GridSize), initialParams)
 	require.NoError(t, err)
@@ -110,7 +110,7 @@ func TestNewRejectsMismatchedInitialParams(t *testing.T) {
 	settings := smallTestSettings()
 
 	rng := rand.New(rand.NewPCG(1, 1))
-	mismatched := actorcritic.NewParams(rng, snakeenv.StateVectorSize(36), settings.HiddenSize, snakeenv.NumActions)
+	mismatched := actorcritic.NewParams(rng, snakeenv.StateVectorSize(36), settings.HiddenSize, snakeenv.NumActions, 2)
 
 	_, err := New(settings, snakeEnvFactory(settings.GridSize), mismatched)
 	assert.Error(t, err)

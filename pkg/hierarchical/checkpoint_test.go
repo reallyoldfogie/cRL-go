@@ -27,14 +27,14 @@ func TestTrainerSaveLoadRoundTripPreservesWeights(t *testing.T) {
 	require.NoError(t, err)
 
 	wantMeta, wantSubs := trainer.Params()
-	assert.Equal(t, wantMeta.W0.Data, meta.W0.Data)
+	assert.Equal(t, wantMeta.Hidden[0].W.Data, meta.Hidden[0].W.Data)
 	assert.Equal(t, wantMeta.Wpi.Data, meta.Wpi.Data)
 	assert.Equal(t, wantMeta.Wv.Data, meta.Wv.Data)
 
 	require.Len(t, subs, cfg.NumSubgoals)
 	for i := range cfg.NumSubgoals {
 		subgoal := Subgoal(i)
-		assert.Equal(t, wantSubs[subgoal].W0.Data, subs[subgoal].W0.Data)
+		assert.Equal(t, wantSubs[subgoal].Hidden[0].W.Data, subs[subgoal].Hidden[0].W.Data)
 		assert.Equal(t, wantSubs[subgoal].Wpi.Data, subs[subgoal].Wpi.Data)
 		assert.Equal(t, wantSubs[subgoal].Wv.Data, subs[subgoal].Wv.Data)
 	}

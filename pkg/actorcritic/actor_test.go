@@ -19,7 +19,7 @@ func testObservation() rl.Observation {
 // rng state, it returns exactly the action a caller hand-driving
 // NewInferenceNetwork/Forward/reinforce.SampleAction would.
 func TestActorActMatchesManualInferenceAndSampling(t *testing.T) {
-	params := NewParams(rand.New(rand.NewPCG(31, 32)), 6, 4, 3)
+	params := NewParams(rand.New(rand.NewPCG(31, 32)), 6, 4, 3, 2)
 	obs := testObservation()
 
 	actor, err := NewActor(params)
@@ -42,7 +42,7 @@ func TestActorActMatchesManualInferenceAndSampling(t *testing.T) {
 // allows only one action always yields that action, regardless of the
 // rng draw.
 func TestActorActWithMaskExcludesDisallowedActions(t *testing.T) {
-	params := NewParams(rand.New(rand.NewPCG(33, 34)), 6, 4, 3)
+	params := NewParams(rand.New(rand.NewPCG(33, 34)), 6, 4, 3, 2)
 	obs := testObservation()
 	mask := []bool{false, true, false}
 
@@ -57,7 +57,7 @@ func TestActorActWithMaskExcludesDisallowedActions(t *testing.T) {
 }
 
 func TestActorActRejectsAllFalseMask(t *testing.T) {
-	params := NewParams(rand.New(rand.NewPCG(35, 36)), 6, 4, 3)
+	params := NewParams(rand.New(rand.NewPCG(35, 36)), 6, 4, 3, 2)
 
 	actor, err := NewActor(params)
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestNewActorRejectsNilParams(t *testing.T) {
 // action as Act for the same Params, obs, and rng state — the richer
 // return value must not introduce any drift of its own.
 func TestActorActWithInfoMatchesAct(t *testing.T) {
-	params := NewParams(rand.New(rand.NewPCG(51, 52)), 6, 4, 3)
+	params := NewParams(rand.New(rand.NewPCG(51, 52)), 6, 4, 3, 2)
 	obs := testObservation()
 
 	actor, err := NewActor(params)
@@ -93,7 +93,7 @@ func TestActorActWithInfoMatchesAct(t *testing.T) {
 // pkg/actorcritic's Actor, which always has a critic, reports
 // HasValue=true with the critic's own value-head output.
 func TestActorActWithInfoReportsValueEstimate(t *testing.T) {
-	params := NewParams(rand.New(rand.NewPCG(53, 54)), 6, 4, 3)
+	params := NewParams(rand.New(rand.NewPCG(53, 54)), 6, 4, 3, 2)
 	obs := testObservation()
 
 	actor, err := NewActor(params)
@@ -115,7 +115,7 @@ func TestActorActWithInfoReportsValueEstimate(t *testing.T) {
 // Probabilities is renormalized over only the allowed actions, while
 // RawProbabilities preserves the policy head's unmasked output.
 func TestActorActWithInfoRenormalizesOverMaskedActions(t *testing.T) {
-	params := NewParams(rand.New(rand.NewPCG(55, 56)), 6, 4, 3)
+	params := NewParams(rand.New(rand.NewPCG(55, 56)), 6, 4, 3, 2)
 	mask := []bool{false, true, false}
 
 	actor, err := NewActor(params)

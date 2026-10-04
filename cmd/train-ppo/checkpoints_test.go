@@ -39,7 +39,7 @@ func TestResumeFromCheckpointDirContinuesExactEpochAndMetadata(t *testing.T) {
 	environmentID := "snake:4"
 
 	rng := rand.New(rand.NewPCG(1, 2))
-	params := actorcritic.NewParams(rng, 8, 4, 3)
+	params := actorcritic.NewParams(rng, 8, 4, 3, 2)
 
 	savedMetadata := checkpoint.Metadata{Epoch: 41, BestReturn: 12.5, TotalUpdates: 328}
 	require.NoError(t, saveCheckpointToDir(dir, params, environmentID, savedMetadata.Epoch, savedMetadata.BestReturn, savedMetadata.TotalUpdates))
@@ -48,7 +48,7 @@ func TestResumeFromCheckpointDirContinuesExactEpochAndMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, resume.Params)
-	assert.Equal(t, params.W0.Data, resume.Params.W0.Data, "resuming must load the exact saved weights")
+	assert.Equal(t, params.Hidden[0].W.Data, resume.Params.Hidden[0].W.Data, "resuming must load the exact saved weights")
 	assert.Equal(t, savedMetadata.Epoch+1, resume.StartEpoch, "resuming must continue from the epoch *after* the one the checkpoint recorded")
 	assert.Equal(t, savedMetadata.BestReturn, resume.BestReturn)
 	assert.Equal(t, savedMetadata.TotalUpdates, resume.TotalUpdates)
@@ -61,7 +61,7 @@ func TestResumeFromCheckpointDirPicksLatestAcrossMultipleSaves(t *testing.T) {
 	dir := t.TempDir()
 	environmentID := "snake:4"
 	rng := rand.New(rand.NewPCG(3, 4))
-	params := actorcritic.NewParams(rng, 8, 4, 3)
+	params := actorcritic.NewParams(rng, 8, 4, 3, 2)
 
 	require.NoError(t, saveCheckpointToDir(dir, params, environmentID, 10, 1.0, 100))
 	require.NoError(t, saveCheckpointToDir(dir, params, environmentID, 50, 5.0, 500))
@@ -77,7 +77,7 @@ func TestResumeFromCheckpointDirPicksLatestAcrossMultipleSaves(t *testing.T) {
 func TestResumeFromCheckpointDirRejectsMismatchedEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	rng := rand.New(rand.NewPCG(5, 6))
-	params := actorcritic.NewParams(rng, 8, 4, 3)
+	params := actorcritic.NewParams(rng, 8, 4, 3, 2)
 
 	require.NoError(t, saveCheckpointToDir(dir, params, "snake:4", 1, 0, 1))
 
@@ -88,7 +88,7 @@ func TestResumeFromCheckpointDirRejectsMismatchedEnvironment(t *testing.T) {
 func TestSaveCheckpointToDirCreatesDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist-yet")
 	rng := rand.New(rand.NewPCG(7, 8))
-	params := actorcritic.NewParams(rng, 4, 4, 2)
+	params := actorcritic.NewParams(rng, 4, 4, 2, 2)
 
 	require.NoError(t, saveCheckpointToDir(dir, params, "snake:4", 0, 0, 1))
 

@@ -35,10 +35,10 @@ func (e *scriptedRewardEnv) ObservationSize() int { return 2 }
 func (e *scriptedRewardEnv) ActionSpace() int     { return 2 }
 
 func testHierarchicalParams(rng *rand.Rand, cfg Config, obsSize, actionSpace int) (*actorcritic.Params, map[Subgoal]*actorcritic.Params) {
-	metaParams := actorcritic.NewParams(rng, obsSize, cfg.MetaHiddenSize, cfg.NumSubgoals)
+	metaParams := actorcritic.NewParams(rng, obsSize, cfg.MetaHiddenSize, cfg.NumSubgoals, 2)
 	subParams := make(map[Subgoal]*actorcritic.Params, cfg.NumSubgoals)
 	for i := range cfg.NumSubgoals {
-		subParams[Subgoal(i)] = actorcritic.NewParams(rng, obsSize+cfg.NumSubgoals, cfg.SubHiddenSize, actionSpace)
+		subParams[Subgoal(i)] = actorcritic.NewParams(rng, obsSize+cfg.NumSubgoals, cfg.SubHiddenSize, actionSpace, 2)
 	}
 	return metaParams, subParams
 }

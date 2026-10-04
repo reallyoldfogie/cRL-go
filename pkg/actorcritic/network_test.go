@@ -13,7 +13,7 @@ import (
 
 func TestInferenceNetworkForwardProducesValidPolicyDistributionAndScalarValue(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
-	params := NewParams(rng, 12, 8, 5)
+	params := NewParams(rng, 12, 8, 5, 2)
 
 	net, err := NewInferenceNetwork(params)
 	require.NoError(t, err)
@@ -38,7 +38,7 @@ func TestInferenceNetworkForwardProducesValidPolicyDistributionAndScalarValue(t 
 
 func TestInferenceNetworksSharePramsButHavePrivateActivations(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 6))
-	params := NewParams(rng, 12, 8, 5)
+	params := NewParams(rng, 12, 8, 5, 2)
 
 	netA, err := NewInferenceNetwork(params)
 	require.NoError(t, err)
@@ -58,7 +58,7 @@ func TestInferenceNetworksSharePramsButHavePrivateActivations(t *testing.T) {
 	// Perturbing a shared weight must be visible to both networks, since
 	// their weight Vars alias the same underlying matrices rather than
 	// copying them (see autograd.Constant).
-	params.W0.Data[0] += 5.0
+	params.Hidden[0].W.Data[0] += 5.0
 
 	netA.Graph.Forward()
 	netB.Graph.Forward()
@@ -71,7 +71,7 @@ func TestInferenceNetworksSharePramsButHavePrivateActivations(t *testing.T) {
 
 func TestZeroGradClearsAccumulatedGradients(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 8))
-	params := NewParams(rng, 6, 4, 3)
+	params := NewParams(rng, 6, 4, 3, 2)
 
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)
@@ -90,29 +90,29 @@ func TestZeroGradClearsAccumulatedGradients(t *testing.T) {
 
 func TestApplyGradientStepUpdatesParameters(t *testing.T) {
 	rng := rand.New(rand.NewPCG(9, 10))
-	params := NewParams(rng, 6, 4, 3)
+	params := NewParams(rng, 6, 4, 3, 2)
 
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)
 
-	before := append([]float32(nil), params.W0.Data...)
+	before := append([]float32(nil), params.Hidden[0].W.Data...)
 	for _, p := range net.params.all() {
 		p.Grad.Fill(1.0)
 	}
 	net.ApplyGradientStep(0.1, 1)
 
-	assert.NotEqual(t, before, params.W0.Data, "ApplyGradientStep should modify the shared parameter matrices")
+	assert.NotEqual(t, before, params.Hidden[0].W.Data, "ApplyGradientStep should modify the shared parameter matrices")
 }
 
 func TestApplyGradientStepNoOpWithZeroSamples(t *testing.T) {
 	rng := rand.New(rand.NewPCG(11, 12))
-	params := NewParams(rng, 6, 4, 3)
+	params := NewParams(rng, 6, 4, 3, 2)
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)
 
-	before := append([]float32(nil), params.W0.Data...)
+	before := append([]float32(nil), params.Hidden[0].W.Data...)
 	net.ApplyGradientStep(0.1, 0)
-	assert.Equal(t, before, params.W0.Data)
+	assert.Equal(t, before, params.Hidden[0].W.Data)
 }
 
 // TestSetActionMaskZeroesMaskedActionProbability mirrors
@@ -121,7 +121,7 @@ func TestApplyGradientStepNoOpWithZeroSamples(t *testing.T) {
 // still sum to 1 — see docs/plans/19-training-time-action-masking.md.
 func TestSetActionMaskZeroesMaskedActionProbability(t *testing.T) {
 	rng := rand.New(rand.NewPCG(205, 206))
-	params := NewParams(rng, 6, 4, 4)
+	params := NewParams(rng, 6, 4, 4, 2)
 
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func assertMatricesClose(t *testing.T, want, got *mat.Matrix, tolerance float64)
 // both heads together.
 func TestGradientCheckTrainingNetworkStandInObjective(t *testing.T) {
 	rng := rand.New(rand.NewPCG(101, 103))
-	params := NewParams(rng, 4, 5, 3)
+	params := NewParams(rng, 4, 5, 3, 2)
 
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)

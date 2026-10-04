@@ -39,17 +39,17 @@ func applyOneGradientStep(params *Params, net *TrainingNetwork, learningRate flo
 // weights.
 func TestSnapshotIsUnaffectedBySubsequentGradientStep(t *testing.T) {
 	rng := rand.New(rand.NewPCG(51, 52))
-	params := NewParams(rng, 6, 4, 3)
+	params := NewParams(rng, 6, 4, 3, 2)
 
 	snapshot := params.Snapshot()
-	before := append([]float32(nil), snapshot.W0.Data...)
+	before := append([]float32(nil), snapshot.Hidden[0].W.Data...)
 
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)
 	applyOneGradientStep(params, net, 0.5)
 
-	assert.NotEqual(t, before, params.W0.Data, "sanity: the live params should have actually changed")
-	assert.Equal(t, before, snapshot.W0.Data, "snapshot's weights must not change when the live params are updated afterward")
+	assert.NotEqual(t, before, params.Hidden[0].W.Data, "sanity: the live params should have actually changed")
+	assert.Equal(t, before, snapshot.Hidden[0].W.Data, "snapshot's weights must not change when the live params are updated afterward")
 }
 
 // TestActorRefreshUpdatesInternalSnapshot confirms Refresh actually
@@ -58,18 +58,18 @@ func TestSnapshotIsUnaffectedBySubsequentGradientStep(t *testing.T) {
 // NewActor time.
 func TestActorRefreshUpdatesInternalSnapshot(t *testing.T) {
 	rng := rand.New(rand.NewPCG(61, 62))
-	params := NewParams(rng, 6, 4, 3)
+	params := NewParams(rng, 6, 4, 3, 2)
 
 	actor, err := NewActor(params)
 	require.NoError(t, err)
-	before := append([]float32(nil), actor.params.Load().W0.Data...)
+	before := append([]float32(nil), actor.params.Load().Hidden[0].W.Data...)
 
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)
 	applyOneGradientStep(params, net, 0.5)
 
 	require.NoError(t, actor.Refresh(params))
-	after := actor.params.Load().W0.Data
+	after := actor.params.Load().Hidden[0].W.Data
 
 	assert.NotEqual(t, before, after, "Refresh should pick up the training update")
 }
@@ -77,7 +77,7 @@ func TestActorRefreshUpdatesInternalSnapshot(t *testing.T) {
 // TestActorRefreshRejectsNilParams mirrors NewActor's nil check.
 func TestActorRefreshRejectsNilParams(t *testing.T) {
 	rng := rand.New(rand.NewPCG(63, 64))
-	params := NewParams(rng, 6, 4, 3)
+	params := NewParams(rng, 6, 4, 3, 2)
 
 	actor, err := NewActor(params)
 	require.NoError(t, err)
@@ -95,7 +95,7 @@ func TestActorRefreshRejectsNilParams(t *testing.T) {
 // design has a real data race.
 func TestParamsSnapshotAndActorAreRaceFreeUnderConcurrentTraining(t *testing.T) {
 	rng := rand.New(rand.NewPCG(71, 72))
-	params := NewParams(rng, 6, 4, 3)
+	params := NewParams(rng, 6, 4, 3, 2)
 
 	net, err := NewTrainingNetwork(params)
 	require.NoError(t, err)

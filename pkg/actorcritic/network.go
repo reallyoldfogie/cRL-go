@@ -2,18 +2,28 @@ package actorcritic
 
 import (
 	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
+	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
 
-// paramVars wraps a Params' eight matrices as autograd.Var leaves.
+// layerVars wraps one hidden Layer's matrices as autograd.Var leaves.
+type layerVars struct {
+	W, B *autograd.Var
+}
+
+// paramVars wraps a Params' hidden layers and both heads as
+// autograd.Var leaves.
 type paramVars struct {
-	W0, B0   *autograd.Var
-	W1, B1   *autograd.Var
+	Hidden   []layerVars
 	Wpi, Bpi *autograd.Var
 	Wv, Bv   *autograd.Var
 }
 
 func (p paramVars) all() []*autograd.Var {
-	return []*autograd.Var{p.W0, p.B0, p.W1, p.B1, p.Wpi, p.Bpi, p.Wv, p.Bv}
+	vars := make([]*autograd.Var, 0, len(p.Hidden)*2+4)
+	for _, l := range p.Hidden {
+		vars = append(vars, l.W, l.B)
+	}
+	return append(vars, p.Wpi, p.Bpi, p.Wv, p.Bv)
 }
 
 // chain mirrors pkg/policy/network.go's sticky-error op-chaining helper.
@@ -58,9 +68,10 @@ func (c *chain) softmax(a *autograd.Var) *autograd.Var {
 	return v
 }
 
-// buildForward wires up the shared trunk (input -> W0,B0 -> ReLU ->
-// W1,B1 -> ReLU) and both heads (Wpi,Bpi -> Softmax for the policy
-// output; Wv,Bv for the value output), returning both output Vars.
+// buildForward wires up the shared trunk (input -> Hidden[0] -> ReLU ->
+// ... -> Hidden[n-1] -> ReLU) and both heads (Wpi,Bpi -> Softmax for
+// the policy output; Wv,Bv for the value output), returning both
+// output Vars.
 // policyMaskBias, when non-nil, is added to the policy head's
 // pre-softmax logits before Softmax — see
 // TrainingNetwork.MaskBias's doc comment for why; it never touches the
@@ -68,15 +79,14 @@ func (c *chain) softmax(a *autograd.Var) *autograd.Var {
 func buildForward(input *autograd.Var, p paramVars, policyMaskBias *autograd.Var) (policyOutput, valueOutput *autograd.Var, err error) {
 	c := &chain{}
 
-	z0 := c.matMul(p.W0, input)
-	z0b := c.add(z0, p.B0)
-	a0 := c.relu(z0b)
+	a := input
+	for _, layer := range p.Hidden {
+		z := c.matMul(layer.W, a)
+		zb := c.add(z, layer.B)
+		a = c.relu(zb)
+	}
 
-	z1 := c.matMul(p.W1, a0)
-	z1b := c.add(z1, p.B1)
-	a1 := c.relu(z1b)
-
-	zpi := c.matMul(p.Wpi, a1)
+	zpi := c.matMul(p.Wpi, a)
 	zpib := c.add(zpi, p.Bpi)
 	policyLogits := zpib
 	if policyMaskBias != nil {
@@ -84,10 +94,29 @@ func buildForward(input *autograd.Var, p paramVars, policyMaskBias *autograd.Var
 	}
 	policyOutput = c.softmax(policyLogits)
 
-	zv := c.matMul(p.Wv, a1)
+	zv := c.matMul(p.Wv, a)
 	valueOutput = c.add(zv, p.Bv)
 
 	return policyOutput, valueOutput, c.err
+}
+
+// buildParamVars wraps params' hidden layers and both heads as
+// autograd.Var leaves, using wrap (autograd.Constant for a read-only
+// InferenceNetwork, autograd.Parameter for a gradient-accumulating
+// TrainingNetwork) for every matrix.
+func buildParamVars(params *Params, wrap func(*mat.Matrix) *autograd.Var) paramVars {
+	hidden := make([]layerVars, len(params.Hidden))
+	for i, layer := range params.Hidden {
+		hidden[i] = layerVars{W: wrap(layer.W), B: wrap(layer.B)}
+	}
+
+	return paramVars{
+		Hidden: hidden,
+		Wpi:    wrap(params.Wpi),
+		Bpi:    wrap(params.Bpi),
+		Wv:     wrap(params.Wv),
+		Bv:     wrap(params.Bv),
+	}
 }
 
 // InferenceNetwork is a forward-only computation graph over a shared,
@@ -109,16 +138,7 @@ type InferenceNetwork struct {
 func NewInferenceNetwork(params *Params) (*InferenceNetwork, error) {
 	input := autograd.NewVar(params.InputSize(), 1, autograd.FlagNone)
 
-	pv := paramVars{
-		W0:  autograd.Constant(params.W0),
-		B0:  autograd.Constant(params.B0),
-		W1:  autograd.Constant(params.W1),
-		B1:  autograd.Constant(params.B1),
-		Wpi: autograd.Constant(params.Wpi),
-		Bpi: autograd.Constant(params.Bpi),
-		Wv:  autograd.Constant(params.Wv),
-		Bv:  autograd.Constant(params.Bv),
-	}
+	pv := buildParamVars(params, autograd.Constant)
 
 	policyOutput, valueOutput, err := buildForward(input, pv, nil)
 	if err != nil {
@@ -133,10 +153,10 @@ func NewInferenceNetwork(params *Params) (*InferenceNetwork, error) {
 	}, nil
 }
 
-// TrainingNetwork wraps a Params' eight matrices as gradient-accumulating
-// (autograd.Parameter) leaves feeding the same shared trunk built by
-// buildForward, exposing both PolicyOutput and ValueOutput so a loss can
-// be composed from them.
+// TrainingNetwork wraps a Params' hidden layers and both heads as
+// gradient-accumulating (autograd.Parameter) leaves feeding the same
+// shared trunk built by buildForward, exposing both PolicyOutput and
+// ValueOutput so a loss can be composed from them.
 //
 // Unlike pkg/policy.TrainingNetwork, TrainingNetwork does not build a
 // Graph or own a Loss: the actual PPO objective (combining
@@ -167,16 +187,7 @@ type TrainingNetwork struct {
 func NewTrainingNetwork(params *Params) (*TrainingNetwork, error) {
 	input := autograd.NewVar(params.InputSize(), 1, autograd.FlagNone)
 
-	pv := paramVars{
-		W0:  autograd.Parameter(params.W0),
-		B0:  autograd.Parameter(params.B0),
-		W1:  autograd.Parameter(params.W1),
-		B1:  autograd.Parameter(params.B1),
-		Wpi: autograd.Parameter(params.Wpi),
-		Bpi: autograd.Parameter(params.Bpi),
-		Wv:  autograd.Parameter(params.Wv),
-		Bv:  autograd.Parameter(params.Bv),
-	}
+	pv := buildParamVars(params, autograd.Parameter)
 
 	maskBias := autograd.NewVar(params.OutputSize(), 1, autograd.FlagNone)
 	policyOutput, valueOutput, err := buildForward(input, pv, maskBias)
@@ -210,8 +221,8 @@ func (n *TrainingNetwork) SetActionMask(mask []bool) {
 	}
 }
 
-// Parameters returns every one of the network's eight trainable weight
-// and bias Vars (the same set ZeroGrad and ApplyGradientStep iterate
+// Parameters returns every one of the network's trainable weight and
+// bias Vars (the same set ZeroGrad and ApplyGradientStep iterate
 // internally), so external callers — gradient-checking a loss built on
 // top of this network (see pkg/ppo), or a future per-parameter optimizer
 // — can access them without reaching into unexported fields.

@@ -8,11 +8,12 @@ import (
 )
 
 // Net2WiderNet returns a new Params whose hidden width is newHiddenSize
-// (both W0/B0's output and W1/B1's output — see NewParams' diagram; this
-// network always keeps the two hidden layers the same width, so widening
-// applies to both), computing the same function p does on any input, up
-// to noiseStd of independent Gaussian noise added to each newly-created
-// unit's weights (0 for exact preservation). p itself is unmodified.
+// (every hidden layer's output — see NewParams' diagram; this network
+// always keeps every hidden layer the same width, so widening applies
+// to all of them together), computing the same function p does on any
+// input, up to noiseStd of independent Gaussian noise added to each
+// newly-created unit's weights (0 for exact preservation). p itself is
+// unmodified.
 //
 // This is Net2Net's "widening" transform (Chen, Goodfellow, Shlens 2016,
 // "Net2Net: Accelerating Learning via Knowledge Transfer",
@@ -51,31 +52,97 @@ func Net2WiderNet(p *Params, newHiddenSize int, noiseStd float32, rng *rand.Rand
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	oldHiddenSize := p.W0.Rows
+	oldHiddenSize := p.HiddenSize()
 	if newHiddenSize <= oldHiddenSize {
 		return nil, fmt.Errorf("actorcritic: Net2WiderNet: newHiddenSize %d must be greater than the current hidden size %d", newHiddenSize, oldHiddenSize)
 	}
 
 	mapTo, count := widenMapping(rng, oldHiddenSize, newHiddenSize)
 
-	w0 := widenProducerAxis(p.W0, mapTo, noiseStd, rng)
-	b0 := widenProducerAxis(p.B0, mapTo, noiseStd, rng)
-
-	// W1 sits at both boundaries this widens: its columns are the first
-	// boundary's consumer side (fed by W0/B0's now-wider output), and its
-	// rows are the second boundary's producer side (feeding Wpi/Wv). Each
-	// axis is widened independently — order between them doesn't matter.
-	w1 := widenProducerAxis(widenConsumerAxis(p.W1, mapTo, count), mapTo, noiseStd, rng)
-	b1 := widenProducerAxis(p.B1, mapTo, noiseStd, rng)
+	// Every hidden layer sits at a producer boundary (its own output
+	// feeds the next layer or a head, so its rows/bias always widen) and
+	// every layer but the first also sits at a consumer boundary (its
+	// input is the previous layer's now-wider output, so its columns
+	// widen too — layer 0's input is the actual observation, untouched
+	// by this). Each axis is widened independently — order between them
+	// doesn't matter, mirroring W1's original two-boundary handling.
+	hidden := make([]Layer, len(p.Hidden))
+	for i, layer := range p.Hidden {
+		w := layer.W
+		if i > 0 {
+			w = widenConsumerAxis(w, mapTo, count)
+		}
+		w = widenProducerAxis(w, mapTo, noiseStd, rng)
+		b := widenProducerAxis(layer.B, mapTo, noiseStd, rng)
+		hidden[i] = Layer{W: w, B: b}
+	}
 
 	wpi := widenConsumerAxis(p.Wpi, mapTo, count)
 	wv := widenConsumerAxis(p.Wv, mapTo, count)
 
 	return &Params{
-		W0: w0, B0: b0,
-		W1: w1, B1: b1,
-		Wpi: wpi, Bpi: cloneMatrix(p.Bpi),
+		Hidden: hidden,
+		Wpi:    wpi, Bpi: cloneMatrix(p.Bpi),
 		Wv: wv, Bv: cloneMatrix(p.Bv),
+	}, nil
+}
+
+// Net2DeeperNet returns a new Params with one extra hidden layer
+// inserted at atDepth — the number of existing hidden layers that come
+// before it, so atDepth must be between 1 and p.NumHiddenLayers()
+// inclusive (atDepth == p.NumHiddenLayers() appends the new layer right
+// before the heads) — computing exactly the same function p does on
+// any input: the inserted layer's weight is the HiddenSize x HiddenSize
+// identity matrix and its bias is zero, so for the preceding layer's
+// ReLU output a (which is >= 0 elementwise), ReLU(I·a + 0) = a exactly.
+// p itself is unmodified.
+//
+// This is Net2Net's "deepening" transform (same 2016 paper as
+// Net2WiderNet's own doc comment cites). Unlike widening, it needs no
+// noise parameter to break symmetry: an inserted identity layer
+// computes a function no other layer in the network computes, so
+// there's no tied-gradient problem the way two widened units sharing
+// one clone-parent have.
+//
+// atDepth == 0 is rejected rather than treated as "insert before
+// Hidden[0]": that boundary's input is the raw observation, not a ReLU
+// output, and ReLU(I·a) == a only holds for a >= 0 — a guarantee only
+// an existing ReLU provides. Every other insertion point sits strictly
+// between two things that already satisfy that (two hidden layers, or
+// the last hidden layer and the heads), which is why they all work the
+// same way.
+func Net2DeeperNet(p *Params, atDepth int) (*Params, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if atDepth < 1 || atDepth > len(p.Hidden) {
+		return nil, fmt.Errorf("actorcritic: Net2DeeperNet: atDepth %d must be between 1 and %d (the current number of hidden layers)", atDepth, len(p.Hidden))
+	}
+
+	hiddenSize := p.HiddenSize()
+	identityW := mat.New(hiddenSize, hiddenSize)
+	for i := 0; i < hiddenSize; i++ {
+		identityW.Data[i*hiddenSize+i] = 1
+	}
+	identity := Layer{W: identityW, B: mat.New(hiddenSize, 1)}
+
+	hidden := make([]Layer, 0, len(p.Hidden)+1)
+	for i, layer := range p.Hidden {
+		if i == atDepth {
+			hidden = append(hidden, identity)
+		}
+		hidden = append(hidden, Layer{W: cloneMatrix(layer.W), B: cloneMatrix(layer.B)})
+	}
+	if atDepth == len(p.Hidden) {
+		hidden = append(hidden, identity)
+	}
+
+	return &Params{
+		Hidden: hidden,
+		Wpi:    cloneMatrix(p.Wpi),
+		Bpi:    cloneMatrix(p.Bpi),
+		Wv:     cloneMatrix(p.Wv),
+		Bv:     cloneMatrix(p.Bv),
 	}, nil
 }
 

@@ -35,7 +35,7 @@ func TestReadCheckpointInfoWorksAgainstAnActorCriticCheckpoint(t *testing.T) {
 	path := filepath.Join(dir, "ppo-epoch-000000009.json")
 
 	rng := rand.New(rand.NewPCG(3, 4))
-	params := actorcritic.NewParams(rng, 6, 5, 2)
+	params := actorcritic.NewParams(rng, 6, 5, 2, 2)
 	metadata := checkpoint.Metadata{Epoch: 9, BestReturn: -1.5, TotalUpdates: 40}
 	require.NoError(t, actorcritic.SaveFile(path, params, "gridworld:6", metadata))
 

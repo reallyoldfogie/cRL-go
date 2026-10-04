@@ -23,10 +23,10 @@ const (
 // seed.
 func newTestActorParams(seed uint64) (*actorcritic.Params, map[Subgoal]*actorcritic.Params) {
 	rng := rand.New(rand.NewPCG(seed, seed+1))
-	meta := actorcritic.NewParams(rng, testActorObsSize, 4, testActorNumSubgoals)
+	meta := actorcritic.NewParams(rng, testActorObsSize, 4, testActorNumSubgoals, 2)
 	subs := make(map[Subgoal]*actorcritic.Params, testActorNumSubgoals)
 	for i := range testActorNumSubgoals {
-		subs[Subgoal(i)] = actorcritic.NewParams(rng, testActorObsSize+testActorNumSubgoals, 4, testActorActionSpace)
+		subs[Subgoal(i)] = actorcritic.NewParams(rng, testActorObsSize+testActorNumSubgoals, 4, testActorActionSpace, 2)
 	}
 	return meta, subs
 }

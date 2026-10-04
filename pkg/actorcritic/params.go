@@ -18,15 +18,24 @@ import (
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
 
+// Layer is one hidden layer's weight matrix and bias vector.
+type Layer struct {
+	W, B *mat.Matrix
+}
+
 // Params holds the learnable weights and biases of the actor-critic MLP:
 //
-//	                          -> Wpi,Bpi -> Softmax -> policy output
-//	input -> W0,B0 -> ReLU -> W1,B1 -> ReLU
-//	                          -> Wv,Bv  -> value output
+//	                                        -> Wpi,Bpi -> Softmax -> policy output
+//	input -> Hidden[0] -> ReLU -> ... -> Hidden[n-1] -> ReLU
+//	                                        -> Wv,Bv  -> value output
 //
-// W0,B0/W1,B1 are the shared trunk (identical in shape and role to
-// pkg/policy.Params' W0,B0/W1,B1); Wpi,Bpi and Wv,Bv are independent
-// linear heads applied to the same trunk output.
+// Hidden is the shared trunk, one or more layers deep; every layer has
+// the same width (HiddenSize), matching Net2WiderNet's existing
+// assumption that the whole trunk widens together — per-layer widths
+// are a non-goal until a real caller needs them (see
+// docs/plans/20-configurable-depth-step-memory-and-dynamic-architecture.md,
+// Part A). Wpi,Bpi and Wv,Bv are independent linear heads applied to
+// the last hidden layer's output.
 //
 // mu guards concurrent access to the matrices below whenever a live,
 // possibly-being-trained Params is read from a different goroutine than
@@ -37,33 +46,44 @@ import (
 type Params struct {
 	mu sync.RWMutex
 
-	W0, B0   *mat.Matrix
-	W1, B1   *mat.Matrix
+	Hidden   []Layer
 	Wpi, Bpi *mat.Matrix
 	Wv, Bv   *mat.Matrix
 }
 
-// NewParams allocates Params for a network with the given layer sizes,
-// using the same Xavier/Glorot uniform initialization as
-// pkg/policy.NewParams for every weight matrix, including the value
-// head (bound = sqrt(6 / (fanIn + fanOut)), fanOut = 1 for Wv). Biases
-// start at zero.
-func NewParams(rng *rand.Rand, inputSize, hiddenSize, outputSize int) *Params {
-	valueHeadSize := 1
-
-	p := &Params{
-		W0:  mat.New(hiddenSize, inputSize),
-		B0:  mat.New(hiddenSize, 1),
-		W1:  mat.New(hiddenSize, hiddenSize),
-		B1:  mat.New(hiddenSize, 1),
-		Wpi: mat.New(outputSize, hiddenSize),
-		Bpi: mat.New(outputSize, 1),
-		Wv:  mat.New(valueHeadSize, hiddenSize),
-		Bv:  mat.New(valueHeadSize, 1),
+// NewParams allocates Params for a network with the given layer sizes
+// and numHiddenLayers hidden layers (every one HiddenSize wide), using
+// the same Xavier/Glorot uniform initialization as pkg/policy.NewParams
+// for every weight matrix, including the value head (bound = sqrt(6 /
+// (fanIn + fanOut)), fanOut = 1 for Wv). Biases start at zero.
+// numHiddenLayers must be at least 1.
+func NewParams(rng *rand.Rand, inputSize, hiddenSize, outputSize, numHiddenLayers int) *Params {
+	if numHiddenLayers < 1 {
+		panic("actorcritic: NewParams: numHiddenLayers must be at least 1")
 	}
 
-	p.W0.FillRand(rng, -xavierBound(inputSize, hiddenSize), xavierBound(inputSize, hiddenSize))
-	p.W1.FillRand(rng, -xavierBound(hiddenSize, hiddenSize), xavierBound(hiddenSize, hiddenSize))
+	valueHeadSize := 1
+
+	hidden := make([]Layer, numHiddenLayers)
+	for i := range hidden {
+		fanIn := hiddenSize
+		if i == 0 {
+			fanIn = inputSize
+		}
+		w := mat.New(hiddenSize, fanIn)
+		b := mat.New(hiddenSize, 1)
+		w.FillRand(rng, -xavierBound(fanIn, hiddenSize), xavierBound(fanIn, hiddenSize))
+		hidden[i] = Layer{W: w, B: b}
+	}
+
+	p := &Params{
+		Hidden: hidden,
+		Wpi:    mat.New(outputSize, hiddenSize),
+		Bpi:    mat.New(outputSize, 1),
+		Wv:     mat.New(valueHeadSize, hiddenSize),
+		Bv:     mat.New(valueHeadSize, 1),
+	}
+
 	p.Wpi.FillRand(rng, -xavierBound(hiddenSize, outputSize), xavierBound(hiddenSize, outputSize))
 	p.Wv.FillRand(rng, -xavierBound(hiddenSize, valueHeadSize), xavierBound(hiddenSize, valueHeadSize))
 
@@ -76,10 +96,13 @@ func xavierBound(fanIn, fanOut int) float32 {
 
 // InputSize, HiddenSize, and OutputSize report the network's layer
 // sizes. OutputSize is the policy head's width (the action space size);
-// the value head is always width 1 regardless of OutputSize.
-func (p *Params) InputSize() int  { return p.W0.Cols }
-func (p *Params) HiddenSize() int { return p.W0.Rows }
-func (p *Params) OutputSize() int { return p.Wpi.Rows }
+// the value head is always width 1 regardless of OutputSize. HiddenSize
+// is every hidden layer's width (see Params' doc comment); use
+// NumHiddenLayers for how many of them there are.
+func (p *Params) InputSize() int       { return p.Hidden[0].W.Cols }
+func (p *Params) HiddenSize() int      { return p.Hidden[0].W.Rows }
+func (p *Params) OutputSize() int      { return p.Wpi.Rows }
+func (p *Params) NumHiddenLayers() int { return len(p.Hidden) }
 
 // Lock acquires p's write lock. Callers applying a gradient update to a
 // Params that other goroutines may concurrently Snapshot (e.g. a live
@@ -105,15 +128,17 @@ func (p *Params) Snapshot() *Params {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	hidden := make([]Layer, len(p.Hidden))
+	for i, layer := range p.Hidden {
+		hidden[i] = Layer{W: cloneMatrix(layer.W), B: cloneMatrix(layer.B)}
+	}
+
 	return &Params{
-		W0:  cloneMatrix(p.W0),
-		B0:  cloneMatrix(p.B0),
-		W1:  cloneMatrix(p.W1),
-		B1:  cloneMatrix(p.B1),
-		Wpi: cloneMatrix(p.Wpi),
-		Bpi: cloneMatrix(p.Bpi),
-		Wv:  cloneMatrix(p.Wv),
-		Bv:  cloneMatrix(p.Bv),
+		Hidden: hidden,
+		Wpi:    cloneMatrix(p.Wpi),
+		Bpi:    cloneMatrix(p.Bpi),
+		Wv:     cloneMatrix(p.Wv),
+		Bv:     cloneMatrix(p.Bv),
 	}
 }
 

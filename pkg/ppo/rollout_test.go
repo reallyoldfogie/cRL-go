@@ -27,7 +27,7 @@ func snakeEnvFactory(gridSize int) reinforce.EnvFactory {
 func TestCollectTrajectoryProducesFiniteLogProbsAndValues(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	gridSize := 4
-	params := actorcritic.NewParams(rng, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions)
+	params := actorcritic.NewParams(rng, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
 
 	rollout, err := collectTrajectory(context.Background(), params, snakeEnvFactory(gridSize), 10, rng)
 	require.NoError(t, err)
@@ -51,7 +51,7 @@ func TestCollectTrajectoryIsDeterministicForAFixedSeed(t *testing.T) {
 	gridSize := 4
 	build := func() (*Rollout, error) {
 		rng := rand.New(rand.NewPCG(5, 6))
-		params := actorcritic.NewParams(rand.New(rand.NewPCG(5, 6)), snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions)
+		params := actorcritic.NewParams(rand.New(rand.NewPCG(5, 6)), snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
 		return collectTrajectory(context.Background(), params, snakeEnvFactory(gridSize), 10, rng)
 	}
 

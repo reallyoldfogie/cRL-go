@@ -76,7 +76,7 @@ func TestGradientCheckPPOLoss(t *testing.T) {
 	// TestGradientCheckReLU's doc comment in pkg/autograd for the same
 	// caveat) without indicating any actual bug.
 	rng := rand.New(rand.NewPCG(1, 4))
-	actorParams := actorcritic.NewParams(rng, 4, 5, 3)
+	actorParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
 
 	net, err := NewTrainingNetwork(actorParams, LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5})
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestGradientCheckPPOLoss(t *testing.T) {
 // sampled action's index, making the expected value computable by hand.
 func TestBuildLossClipsRatioOutsideBounds(t *testing.T) {
 	rng := rand.New(rand.NewPCG(419, 421))
-	actorParams := actorcritic.NewParams(rng, 4, 5, 3)
+	actorParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
 	clipEpsilon := float32(0.2)
 
 	net, err := NewTrainingNetwork(actorParams, LossConfig{ClipEpsilon: clipEpsilon, EntropyCoef: 0, ValueCoef: 0})
@@ -147,7 +147,7 @@ func TestBuildLossClipsRatioOutsideBounds(t *testing.T) {
 // term itself vanishes (min(0,0)=0), leaving only the value term.
 func TestBuildLossValueTermIsSquaredError(t *testing.T) {
 	rng := rand.New(rand.NewPCG(431, 433))
-	actorParams := actorcritic.NewParams(rng, 4, 5, 3)
+	actorParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
 	valueCoef := float32(2.0)
 
 	net, err := NewTrainingNetwork(actorParams, LossConfig{ClipEpsilon: 1.0, EntropyCoef: 0, ValueCoef: valueCoef})

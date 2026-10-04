@@ -17,28 +17,62 @@ import (
 // backward compatible with, so Load always requires and validates it.
 type CheckpointSchemaVersion int
 
-// checkpointSchemaVersionCurrent is the only schema version this
-// package has ever written.
-const checkpointSchemaVersionCurrent CheckpointSchemaVersion = 1
+// checkpointSchemaVersionCurrent is the schema version Save writes.
+// Version 1 (exactly two hidden layers per network, named
+// w0/b0/w1/b1 rather than a "hidden" list) is still accepted by Load —
+// see migrateNetworkSchemaV1 — now that pkg/actorcritic's hidden-layer
+// depth is configurable
+// (docs/plans/20-configurable-depth-step-memory-and-dynamic-architecture.md,
+// Part A); Save never writes version 1 again.
+const checkpointSchemaVersionCurrent CheckpointSchemaVersion = 2
+
+// hiddenLayerData mirrors pkg/actorcritic's identically-named type
+// (duplicated rather than shared, for the same reason this package's
+// other checkpoint types already are — see this file's other doc
+// comments): the on-disk JSON representation of one hidden Layer's
+// flattened weight/bias data.
+type hiddenLayerData struct {
+	W []float32 `json:"w"`
+	B []float32 `json:"b"`
+}
 
 // networkCheckpointData is the on-disk JSON representation of one
 // actorcritic.Params' layer sizes and weight/bias data, reusing the
-// same field layout as pkg/actorcritic.checkpointData's weight fields.
-// It carries no EnvironmentID/Metadata of its own — checkpointData
-// below carries those once for the whole N+1-network generation.
+// same field layout as pkg/actorcritic.checkpointData. It carries no
+// EnvironmentID/Metadata of its own — checkpointData below carries
+// those once for the whole N+1-network generation.
+//
+// W0/B0/W1/B1 are schema-version-1-only fields, read when
+// SchemaVersion is 1 (see migrateNetworkSchemaV1); Save never writes
+// them.
 type networkCheckpointData struct {
 	InputSize  int `json:"input_size"`
 	HiddenSize int `json:"hidden_size"`
 	OutputSize int `json:"output_size"`
 
-	W0  []float32 `json:"w0"`
-	B0  []float32 `json:"b0"`
-	W1  []float32 `json:"w1"`
-	B1  []float32 `json:"b1"`
+	Hidden []hiddenLayerData `json:"hidden,omitempty"`
+
 	Wpi []float32 `json:"wpi"`
 	Bpi []float32 `json:"bpi"`
 	Wv  []float32 `json:"wv"`
 	Bv  []float32 `json:"bv"`
+
+	W0 []float32 `json:"w0,omitempty"`
+	B0 []float32 `json:"b0,omitempty"`
+	W1 []float32 `json:"w1,omitempty"`
+	B1 []float32 `json:"b1,omitempty"`
+}
+
+// migrateNetworkSchemaV1 mirrors pkg/actorcritic's migrateSchemaV1:
+// a schema-1 network is always exactly two hidden layers, so mapping
+// its W0/B0, W1/B1 fields onto a 2-element Hidden list is lossless.
+func migrateNetworkSchemaV1(data networkCheckpointData) networkCheckpointData {
+	data.Hidden = []hiddenLayerData{
+		{W: data.W0, B: data.B0},
+		{W: data.W1, B: data.B1},
+	}
+	data.W0, data.B0, data.W1, data.B1 = nil, nil, nil, nil
+	return data
 }
 
 // checkpointData is the on-disk JSON representation of a Trainer's
@@ -68,14 +102,16 @@ type checkpointData struct {
 // toNetworkData copies p's layer sizes and weight/bias data into the
 // on-disk representation used by Save.
 func toNetworkData(p *actorcritic.Params) networkCheckpointData {
+	hidden := make([]hiddenLayerData, len(p.Hidden))
+	for i, layer := range p.Hidden {
+		hidden[i] = hiddenLayerData{W: layer.W.Data, B: layer.B.Data}
+	}
+
 	return networkCheckpointData{
 		InputSize:  p.InputSize(),
 		HiddenSize: p.HiddenSize(),
 		OutputSize: p.OutputSize(),
-		W0:         p.W0.Data,
-		B0:         p.B0.Data,
-		W1:         p.W1.Data,
-		B1:         p.B1.Data,
+		Hidden:     hidden,
 		Wpi:        p.Wpi.Data,
 		Bpi:        p.Bpi.Data,
 		Wv:         p.Wv.Data,
@@ -92,44 +128,68 @@ type networkField struct {
 	src  []float32
 }
 
-// fromNetworkData reconstructs an actorcritic.Params from data,
-// rejecting it if any saved matrix's data doesn't match the shape
-// implied by data's saved layer sizes (e.g. a truncated or hand-edited
-// file). networkName (e.g. "meta-controller" or "sub-policy 2")
-// identifies which network a shape-mismatch error refers to.
+// fromNetworkData reconstructs an actorcritic.Params from data (already
+// migrated to the current schema if it was schema 1 — see
+// migrateNetworkSchemaV1), rejecting it if any saved matrix's data
+// doesn't match the shape implied by data's saved layer sizes (e.g. a
+// truncated or hand-edited file). networkName (e.g. "meta-controller"
+// or "sub-policy 2") identifies which network a shape-mismatch error
+// refers to.
 func fromNetworkData(data networkCheckpointData, networkName string) (*actorcritic.Params, error) {
-	valueHeadSize := 1
-	params := &actorcritic.Params{
-		W0:  mat.New(data.HiddenSize, data.InputSize),
-		B0:  mat.New(data.HiddenSize, 1),
-		W1:  mat.New(data.HiddenSize, data.HiddenSize),
-		B1:  mat.New(data.HiddenSize, 1),
-		Wpi: mat.New(data.OutputSize, data.HiddenSize),
-		Bpi: mat.New(data.OutputSize, 1),
-		Wv:  mat.New(valueHeadSize, data.HiddenSize),
-		Bv:  mat.New(valueHeadSize, 1),
+	if len(data.Hidden) == 0 {
+		return nil, fmt.Errorf("hierarchical: loading checkpoint: %s has no hidden layers", networkName)
 	}
 
-	fields := []networkField{
-		{name: "w0", dst: params.W0, src: data.W0},
-		{name: "b0", dst: params.B0, src: data.B0},
-		{name: "w1", dst: params.W1, src: data.W1},
-		{name: "b1", dst: params.B1, src: data.B1},
+	hidden := make([]actorcritic.Layer, len(data.Hidden))
+	for i, layerData := range data.Hidden {
+		fanIn := data.HiddenSize
+		if i == 0 {
+			fanIn = data.InputSize
+		}
+		w := mat.New(data.HiddenSize, fanIn)
+		b := mat.New(data.HiddenSize, 1)
+		if err := copyNetworkField(networkField{name: fmt.Sprintf("hidden[%d].w", i), dst: w, src: layerData.W}, networkName); err != nil {
+			return nil, err
+		}
+		if err := copyNetworkField(networkField{name: fmt.Sprintf("hidden[%d].b", i), dst: b, src: layerData.B}, networkName); err != nil {
+			return nil, err
+		}
+		hidden[i] = actorcritic.Layer{W: w, B: b}
+	}
+
+	valueHeadSize := 1
+	params := &actorcritic.Params{
+		Hidden: hidden,
+		Wpi:    mat.New(data.OutputSize, data.HiddenSize),
+		Bpi:    mat.New(data.OutputSize, 1),
+		Wv:     mat.New(valueHeadSize, data.HiddenSize),
+		Bv:     mat.New(valueHeadSize, 1),
+	}
+
+	for _, field := range []networkField{
 		{name: "wpi", dst: params.Wpi, src: data.Wpi},
 		{name: "bpi", dst: params.Bpi, src: data.Bpi},
 		{name: "wv", dst: params.Wv, src: data.Wv},
 		{name: "bv", dst: params.Bv, src: data.Bv},
-	}
-	for _, field := range fields {
-		if len(field.src) != len(field.dst.Data) {
-			return nil, fmt.Errorf(
-				"hierarchical: loading checkpoint: %s %s has %d values, want %d",
-				networkName, field.name, len(field.src), len(field.dst.Data),
-			)
+	} {
+		if err := copyNetworkField(field, networkName); err != nil {
+			return nil, err
 		}
-		copy(field.dst.Data, field.src)
 	}
 	return params, nil
+}
+
+// copyNetworkField copies f.src into f.dst, rejecting the checkpoint if
+// the saved data's length doesn't match the matrix's shape.
+func copyNetworkField(f networkField, networkName string) error {
+	if len(f.src) != len(f.dst.Data) {
+		return fmt.Errorf(
+			"hierarchical: loading checkpoint: %s %s has %d values, want %d",
+			networkName, f.name, len(f.src), len(f.dst.Data),
+		)
+	}
+	copy(f.dst.Data, f.src)
+	return nil
 }
 
 // Save writes tr's meta-controller's and every sub-policy's weights to
@@ -170,12 +230,22 @@ func Load(r io.Reader, expectedEnvironmentID string, expectedNumSubgoals int) (*
 	if err := json.NewDecoder(r).Decode(&data); err != nil {
 		return nil, nil, checkpoint.Metadata{}, fmt.Errorf("hierarchical: loading checkpoint: %w", err)
 	}
-	if data.SchemaVersion != checkpointSchemaVersionCurrent {
+
+	switch data.SchemaVersion {
+	case 1:
+		data.Meta = migrateNetworkSchemaV1(data.Meta)
+		for i, sub := range data.Subs {
+			data.Subs[i] = migrateNetworkSchemaV1(sub)
+		}
+	case checkpointSchemaVersionCurrent:
+		// already current
+	default:
 		return nil, nil, checkpoint.Metadata{}, fmt.Errorf(
 			"hierarchical: loading checkpoint: unsupported schema version %d",
 			data.SchemaVersion,
 		)
 	}
+
 	if data.EnvironmentID != expectedEnvironmentID {
 		return nil, nil, checkpoint.Metadata{}, fmt.Errorf(
 			"hierarchical: loading checkpoint: saved for environment %q, want %q",

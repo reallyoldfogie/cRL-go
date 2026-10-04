@@ -18,7 +18,7 @@ import (
 func TestNet2WiderNetWithZeroNoisePreservesTheFunctionExactly(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	inputSize, hiddenSize, outputSize := 17, 8, 4
-	p := NewParams(rng, inputSize, hiddenSize, outputSize)
+	p := NewParams(rng, inputSize, hiddenSize, outputSize, 2)
 
 	wide, err := Net2WiderNet(p, 20, 0, rand.New(rand.NewPCG(9, 9)))
 	require.NoError(t, err)
@@ -54,14 +54,14 @@ func TestNet2WiderNetWithZeroNoisePreservesTheFunctionExactly(t *testing.T) {
 // pin W1's correctness.
 func TestNet2WiderNetLeavesPureProducerParametersAtTheirOriginalIndexUntouched(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
-	p := NewParams(rng, 5, 6, 2)
+	p := NewParams(rng, 5, 6, 2, 2)
 
 	wide, err := Net2WiderNet(p, 11, 0.5, rand.New(rand.NewPCG(5, 6)))
 	require.NoError(t, err)
 
-	assertRowsEqual(t, p.W0, wide.W0, p.W0.Rows)
-	assertRowsEqual(t, p.B0, wide.B0, p.B0.Rows)
-	assertRowsEqual(t, p.B1, wide.B1, p.B1.Rows)
+	assertRowsEqual(t, p.Hidden[0].W, wide.Hidden[0].W, p.Hidden[0].W.Rows)
+	assertRowsEqual(t, p.Hidden[0].B, wide.Hidden[0].B, p.Hidden[0].B.Rows)
+	assertRowsEqual(t, p.Hidden[1].B, wide.Hidden[1].B, p.Hidden[1].B.Rows)
 
 	// Wpi/Wv's own rows (the action/value outputs) are unchanged in count;
 	// only their columns (hidden inputs) grow, and every original column j
@@ -69,7 +69,7 @@ func TestNet2WiderNetLeavesPureProducerParametersAtTheirOriginalIndexUntouched(t
 	// zero (a unit's contribution never gets silently dropped).
 	assert.Equal(t, p.Wpi.Rows, wide.Wpi.Rows)
 	assert.Equal(t, p.Wv.Rows, wide.Wv.Rows)
-	for c := 0; c < p.W0.Rows; c++ {
+	for c := 0; c < p.Hidden[0].W.Rows; c++ {
 		for r := 0; r < wide.Wpi.Rows; r++ {
 			if p.Wpi.Data[r*p.Wpi.Cols+c] != 0 {
 				assert.NotZero(t, wide.Wpi.Data[r*wide.Wpi.Cols+c])
@@ -134,7 +134,7 @@ func TestWidenConsumerAxisSplitsADuplicatedUnitsWeightSoTheSumIsUnchanged(t *tes
 
 func TestNet2WiderNetRejectsShrinkingOrEqualSize(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 1))
-	p := NewParams(rng, 5, 8, 2)
+	p := NewParams(rng, 5, 8, 2, 2)
 
 	_, err := Net2WiderNet(p, 8, 0, rng)
 	assert.Error(t, err, "equal size must be rejected, not silently a no-op")
@@ -148,16 +148,73 @@ func TestNet2WiderNetRejectsShrinkingOrEqualSize(t *testing.T) {
 // for a tool applying this to a saved generation in place.
 func TestNet2WiderNetDoesNotMutateTheOriginal(t *testing.T) {
 	rng := rand.New(rand.NewPCG(2, 2))
-	p := NewParams(rng, 5, 8, 2)
+	p := NewParams(rng, 5, 8, 2, 2)
 	before := p.Snapshot()
 
 	_, err := Net2WiderNet(p, 12, 0.1, rand.New(rand.NewPCG(3, 3)))
 	require.NoError(t, err)
 
-	assert.Equal(t, before.W0.Data, p.W0.Data)
-	assert.Equal(t, before.W1.Data, p.W1.Data)
+	assert.Equal(t, before.Hidden[0].W.Data, p.Hidden[0].W.Data)
+	assert.Equal(t, before.Hidden[1].W.Data, p.Hidden[1].W.Data)
 	assert.Equal(t, before.Wpi.Data, p.Wpi.Data)
 	assert.Equal(t, before.Wv.Data, p.Wv.Data)
+}
+
+// TestNet2DeeperNetPreservesTheFunctionExactly is Net2DeeperNet's
+// central claim: inserting an identity layer anywhere between two
+// existing ReLU boundaries computes the same policy and value output
+// on any input, with no noise parameter needed (unlike widening).
+// Checked against real inference, not hand-rolled arithmetic, so this
+// exercises the same path training/eval actually use.
+func TestNet2DeeperNetPreservesTheFunctionExactly(t *testing.T) {
+	rng := rand.New(rand.NewPCG(301, 302))
+	p := NewParams(rng, 9, 6, 4, 3)
+
+	for atDepth := 1; atDepth <= p.NumHiddenLayers(); atDepth++ {
+		deeper, err := Net2DeeperNet(p, atDepth)
+		require.NoError(t, err)
+		require.Equal(t, p.NumHiddenLayers()+1, deeper.NumHiddenLayers())
+
+		for trial := 0; trial < 5; trial++ {
+			obs := rl.Observation{Values: randomVector(rng, 9)}
+
+			orig, err := forward(p, obs)
+			require.NoError(t, err)
+			got, err := forward(deeper, obs)
+			require.NoError(t, err)
+
+			for i := range orig.policy {
+				assert.InDelta(t, orig.policy[i], got.policy[i], 1e-5, "atDepth=%d policy[%d] on trial %d", atDepth, i, trial)
+			}
+			assert.InDelta(t, orig.value, got.value, 1e-5, "atDepth=%d value on trial %d", atDepth, trial)
+		}
+	}
+}
+
+func TestNet2DeeperNetRejectsOutOfRangeDepth(t *testing.T) {
+	rng := rand.New(rand.NewPCG(303, 304))
+	p := NewParams(rng, 5, 4, 2, 2)
+
+	_, err := Net2DeeperNet(p, 0)
+	assert.Error(t, err, "depth 0 (before Hidden[0], not after a ReLU) must be rejected")
+
+	_, err = Net2DeeperNet(p, 3)
+	assert.Error(t, err, "depth beyond the current number of hidden layers must be rejected")
+}
+
+// TestNet2DeeperNetDoesNotMutateTheOriginal mirrors
+// TestNet2WiderNetDoesNotMutateTheOriginal for the deepening transform.
+func TestNet2DeeperNetDoesNotMutateTheOriginal(t *testing.T) {
+	rng := rand.New(rand.NewPCG(305, 306))
+	p := NewParams(rng, 5, 4, 2, 2)
+	before := p.Snapshot()
+
+	_, err := Net2DeeperNet(p, 1)
+	require.NoError(t, err)
+
+	assert.Equal(t, before.Hidden[0].W.Data, p.Hidden[0].W.Data)
+	assert.Equal(t, before.Hidden[1].W.Data, p.Hidden[1].W.Data)
+	assert.Equal(t, 2, p.NumHiddenLayers(), "the original must keep its original depth")
 }
 
 func randomVector(rng *rand.Rand, n int) []float32 {

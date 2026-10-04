@@ -172,7 +172,7 @@ func NewWithPersistentEnvPool(settings config.Settings, envs []rl.Environment, i
 func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand, initialParams *actorcritic.Params) (*Trainer, error) {
 	params := initialParams
 	if params == nil {
-		params = actorcritic.NewParams(initRNG, env.ObservationSize(), settings.HiddenSize, env.ActionSpace())
+		params = actorcritic.NewParams(initRNG, env.ObservationSize(), settings.HiddenSize, env.ActionSpace(), 2)
 	} else if err := validateParamsShape(params, env, settings); err != nil {
 		return nil, err
 	}

@@ -170,7 +170,7 @@ func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory, 
 			return nil, err
 		}
 	} else {
-		metaParams = actorcritic.NewParams(initRNG, env.ObservationSize(), cfg.MetaHiddenSize, cfg.NumSubgoals)
+		metaParams = actorcritic.NewParams(initRNG, env.ObservationSize(), cfg.MetaHiddenSize, cfg.NumSubgoals, 2)
 	}
 	metaNetwork, err := ppo.NewTrainingNetwork(metaParams, lossConfigFrom(settings))
 	if err != nil {
@@ -190,7 +190,7 @@ func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory, 
 				return nil, err
 			}
 		} else {
-			params = actorcritic.NewParams(initRNG, env.ObservationSize()+cfg.NumSubgoals, cfg.SubHiddenSize, env.ActionSpace())
+			params = actorcritic.NewParams(initRNG, env.ObservationSize()+cfg.NumSubgoals, cfg.SubHiddenSize, env.ActionSpace(), 2)
 		}
 
 		network, err := ppo.NewTrainingNetwork(params, lossConfigFrom(settings))
