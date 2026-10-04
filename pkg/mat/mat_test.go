@@ -139,6 +139,38 @@ func TestReLUAndReLUAddGrad(t *testing.T) {
 	assert.Equal(t, []float32{0, 0, 5}, dst.Data)
 }
 
+func TestSigmoidAndSigmoidAddGrad(t *testing.T) {
+	in := &Matrix{Rows: 1, Cols: 3, Data: []float32{0, 10, -10}}
+	out := New(1, 3)
+	require.NoError(t, out.Sigmoid(in))
+	assert.InDelta(t, 0.5, out.Data[0], 1e-6)
+	assert.InDelta(t, 1.0, out.Data[1], 1e-4)
+	assert.InDelta(t, 0.0, out.Data[2], 1e-4)
+
+	sigmoidOut := &Matrix{Rows: 1, Cols: 1, Data: []float32{0.5}}
+	grad := &Matrix{Rows: 1, Cols: 1, Data: []float32{1}}
+	dst := New(1, 1)
+	require.NoError(t, dst.SigmoidAddGrad(sigmoidOut, grad))
+	// 1 * 0.5 * (1 - 0.5) == 0.25
+	assert.InDelta(t, 0.25, dst.Data[0], 1e-6)
+}
+
+func TestTanhAndTanhAddGrad(t *testing.T) {
+	in := &Matrix{Rows: 1, Cols: 3, Data: []float32{0, 10, -10}}
+	out := New(1, 3)
+	require.NoError(t, out.Tanh(in))
+	assert.InDelta(t, 0.0, out.Data[0], 1e-6)
+	assert.InDelta(t, 1.0, out.Data[1], 1e-4)
+	assert.InDelta(t, -1.0, out.Data[2], 1e-4)
+
+	tanhOut := &Matrix{Rows: 1, Cols: 1, Data: []float32{0.5}}
+	grad := &Matrix{Rows: 1, Cols: 1, Data: []float32{1}}
+	dst := New(1, 1)
+	require.NoError(t, dst.TanhAddGrad(tanhOut, grad))
+	// 1 * (1 - 0.5^2) == 0.75
+	assert.InDelta(t, 0.75, dst.Data[0], 1e-6)
+}
+
 func TestSoftmaxAddGrad(t *testing.T) {
 	softmaxOut := &Matrix{Rows: 1, Cols: 2, Data: []float32{0.25, 0.75}}
 	grad := &Matrix{Rows: 1, Cols: 2, Data: []float32{1, 0}}

@@ -43,6 +43,52 @@ func (reluOp) Backward(v *Var) {
 	}
 }
 
+// sigmoidOp is the logistic sigmoid activation.
+type sigmoidOp struct{}
+
+func (sigmoidOp) NumInputs() int { return 1 }
+
+func (sigmoidOp) Shape(inputs ...*Var) (int, int, bool) {
+	if inputs[0] == nil {
+		return 0, 0, false
+	}
+	return inputs[0].Val.Rows, inputs[0].Val.Cols, true
+}
+
+func (sigmoidOp) Forward(v *Var) {
+	_ = v.Val.Sigmoid(v.Inputs[0].Val)
+}
+
+func (sigmoidOp) Backward(v *Var) {
+	input := v.Inputs[0]
+	if requiresGrad(input) {
+		_ = input.Grad.SigmoidAddGrad(v.Val, v.Grad)
+	}
+}
+
+// tanhOp is the hyperbolic tangent activation.
+type tanhOp struct{}
+
+func (tanhOp) NumInputs() int { return 1 }
+
+func (tanhOp) Shape(inputs ...*Var) (int, int, bool) {
+	if inputs[0] == nil {
+		return 0, 0, false
+	}
+	return inputs[0].Val.Rows, inputs[0].Val.Cols, true
+}
+
+func (tanhOp) Forward(v *Var) {
+	_ = v.Val.Tanh(v.Inputs[0].Val)
+}
+
+func (tanhOp) Backward(v *Var) {
+	input := v.Inputs[0]
+	if requiresGrad(input) {
+		_ = input.Grad.TanhAddGrad(v.Val, v.Grad)
+	}
+}
+
 // softmaxOp is the softmax activation.
 type softmaxOp struct{}
 
@@ -295,6 +341,16 @@ func ReLU(input *Var) (*Var, error) {
 // input's elements.
 func Softmax(input *Var) (*Var, error) {
 	return newNode(softmaxOp{}, input)
+}
+
+// Sigmoid returns a new Var computing elementwise 1/(1+exp(-input)).
+func Sigmoid(input *Var) (*Var, error) {
+	return newNode(sigmoidOp{}, input)
+}
+
+// Tanh returns a new Var computing elementwise tanh(input).
+func Tanh(input *Var) (*Var, error) {
+	return newNode(tanhOp{}, input)
 }
 
 // Add returns a new Var computing a + b elementwise.

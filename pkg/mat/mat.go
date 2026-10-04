@@ -292,6 +292,30 @@ func (dst *Matrix) Softmax(in *Matrix) error {
 	return nil
 }
 
+// Sigmoid computes dst = 1 / (1 + exp(-in)) elementwise.
+func (dst *Matrix) Sigmoid(in *Matrix) error {
+	if err := checkSameShape(dst, in); err != nil {
+		return err
+	}
+
+	for i, v := range in.Data {
+		dst.Data[i] = float32(1.0 / (1.0 + math.Exp(-float64(v))))
+	}
+	return nil
+}
+
+// Tanh computes dst = tanh(in) elementwise.
+func (dst *Matrix) Tanh(in *Matrix) error {
+	if err := checkSameShape(dst, in); err != nil {
+		return err
+	}
+
+	for i, v := range in.Data {
+		dst.Data[i] = float32(math.Tanh(float64(v)))
+	}
+	return nil
+}
+
 // Exp computes dst = exp(in) elementwise.
 func (dst *Matrix) Exp(in *Matrix) error {
 	if err := checkSameShape(dst, in); err != nil {
@@ -373,6 +397,42 @@ func (dst *Matrix) ReLUAddGrad(in, grad *Matrix) error {
 		if v > 0 {
 			dst.Data[i] += grad.Data[i]
 		}
+	}
+	return nil
+}
+
+// SigmoidAddGrad accumulates the gradient of Sigmoid with respect to its
+// input into dst: dst[i] += grad[i] * sigmoidOut[i] * (1 - sigmoidOut[i]),
+// the standard sigmoid derivative expressed in terms of the forward
+// output (sigmoidOut) rather than re-deriving it from the pre-activation
+// input, mirroring SoftmaxAddGrad's own use of its forward output below.
+func (dst *Matrix) SigmoidAddGrad(sigmoidOut, grad *Matrix) error {
+	if err := checkSameShape(dst, sigmoidOut); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i, s := range sigmoidOut.Data {
+		dst.Data[i] += grad.Data[i] * s * (1 - s)
+	}
+	return nil
+}
+
+// TanhAddGrad accumulates the gradient of Tanh with respect to its input
+// into dst: dst[i] += grad[i] * (1 - tanhOut[i]^2), the standard tanh
+// derivative expressed in terms of the forward output (tanhOut).
+func (dst *Matrix) TanhAddGrad(tanhOut, grad *Matrix) error {
+	if err := checkSameShape(dst, tanhOut); err != nil {
+		return err
+	}
+	if err := checkSameShape(dst, grad); err != nil {
+		return err
+	}
+
+	for i, t := range tanhOut.Data {
+		dst.Data[i] += grad.Data[i] * (1 - t*t)
 	}
 	return nil
 }

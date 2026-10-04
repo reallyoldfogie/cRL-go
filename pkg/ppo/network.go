@@ -57,7 +57,7 @@ func NewTrainingNetwork(actorParams *actorcritic.Params, cfg LossConfig) (*Train
 	advantage := autograd.NewVar(outputSize, 1, autograd.FlagNone)
 	returnTarget := autograd.NewVar(1, 1, autograd.FlagNone)
 
-	loss, err := buildLoss(actor, actionMask, oldLogProb, advantage, returnTarget, cfg)
+	loss, err := buildLoss(actor.PolicyOutput, actor.ValueOutput, actionMask, oldLogProb, advantage, returnTarget, cfg)
 	if err != nil {
 		return nil, err
 	}

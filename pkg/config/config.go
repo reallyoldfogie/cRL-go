@@ -74,6 +74,18 @@ type Settings struct {
 	// high-variance minibatch can produce, and Adam's own per-parameter
 	// adaptive scaling only catches up to it gradually.
 	MaxGradNorm float32 `json:"max_grad_norm"`
+
+	// RecurrentChunkLen is the fixed number of consecutive steps of one
+	// rollout pkg/ppo's RecurrentTrainer trains on in a single
+	// Forward/Backward call (backprop through time over that many
+	// unrolled timesteps) — 0 disables recurrence entirely and is
+	// unused by the plain (non-recurrent) Trainer. See
+	// docs/plans/20-configurable-depth-step-memory-and-dynamic-architecture.md,
+	// Part B, for why recurrence forces training on fixed-length
+	// contiguous chunks rather than individually-shuffled steps the way
+	// the non-recurrent Trainer does. MinibatchSize/PPOEpochs count
+	// chunks, not individual steps, once this is set.
+	RecurrentChunkLen int `json:"recurrent_chunk_len"`
 }
 
 // Default returns the out-of-the-box hyperparameters, matching the
@@ -158,6 +170,9 @@ func (s Settings) Validate() error {
 	}
 	if s.MaxGradNorm < 0 {
 		return fmt.Errorf("config: max_grad_norm must not be negative, got %g", s.MaxGradNorm)
+	}
+	if s.RecurrentChunkLen < 0 {
+		return fmt.Errorf("config: recurrent_chunk_len must not be negative, got %d", s.RecurrentChunkLen)
 	}
 	return nil
 }

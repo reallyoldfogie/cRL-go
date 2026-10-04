@@ -1,7 +1,6 @@
 package ppo
 
 import (
-	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
 	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 )
@@ -30,12 +29,12 @@ import (
 //     sampled action's index only (via actionMask, through MatMul),
 //     contributing exactly once.
 func buildLoss(
-	actor *actorcritic.TrainingNetwork,
+	policyOutput, valueOutput *autograd.Var,
 	actionMask, oldLogProb, advantage, returnTarget *autograd.Var,
 	cfg LossConfig,
 ) (*autograd.Var, error) {
-	probs := actor.PolicyOutput
-	value := actor.ValueOutput
+	probs := policyOutput
+	value := valueOutput
 
 	logProbsNew, err := autograd.Log(probs)
 	if err != nil {

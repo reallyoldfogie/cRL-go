@@ -106,3 +106,11 @@ func (a *Actor) ActWithInfo(obs rl.Observation, mask []bool, rng *rand.Rand) (rl
 		HasValue:         true,
 	}, nil
 }
+
+// Reset is a no-op: Act/ActWithInfo build a fresh InferenceNetwork per
+// call and carry nothing between them, so there is no per-episode state
+// to clear. Exists so Actor and RecurrentActor (which does carry
+// per-episode LSTM state, and needs a real Reset between episodes)
+// satisfy the same interface for a caller that treats either uniformly
+// — see RecurrentActor's own doc comment.
+func (a *Actor) Reset() {}

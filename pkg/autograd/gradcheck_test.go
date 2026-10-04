@@ -137,6 +137,46 @@ func TestGradientCheckReLU(t *testing.T) {
 	assertMatricesClose(t, x.Grad, numericalGradient(x, out, graph.Forward), gradCheckTolerance)
 }
 
+func TestGradientCheckSigmoid(t *testing.T) {
+	// Composed with a fixed-weight MatMul for the same reason
+	// TestGradientCheckSoftmax below does: sigmoid alone has no
+	// particular constant-sum property, but a weighted combination
+	// gives a cleaner non-trivial scalar objective to check.
+	x := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 4, Cols: 1, Data: []float32{-0.7, -0.3, 0.2, 0.9}}}
+	x.Grad = mat.New(4, 1)
+
+	sig, err := Sigmoid(x)
+	require.NoError(t, err)
+
+	weights := &Var{Val: &mat.Matrix{Rows: 1, Cols: 4, Data: []float32{1, 2, 3, 4}}}
+	out, err := MatMul(weights, sig)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, x.Grad, numericalGradient(x, out, graph.Forward), gradCheckTolerance)
+}
+
+func TestGradientCheckTanh(t *testing.T) {
+	x := &Var{Flags: FlagRequiresGrad, Val: &mat.Matrix{Rows: 4, Cols: 1, Data: []float32{-0.7, -0.3, 0.2, 0.9}}}
+	x.Grad = mat.New(4, 1)
+
+	tanh, err := Tanh(x)
+	require.NoError(t, err)
+
+	weights := &Var{Val: &mat.Matrix{Rows: 1, Cols: 4, Data: []float32{1, 2, 3, 4}}}
+	out, err := MatMul(weights, tanh)
+	require.NoError(t, err)
+
+	graph := BuildGraph(out)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, x.Grad, numericalGradient(x, out, graph.Forward), gradCheckTolerance)
+}
+
 func TestGradientCheckSoftmax(t *testing.T) {
 	// sum(softmax(x)) == 1 for any x, so its gradient w.r.t. x is
 	// trivially zero and wouldn't exercise Backward meaningfully.
