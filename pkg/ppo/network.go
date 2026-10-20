@@ -37,8 +37,10 @@ type TrainingNetwork struct {
 	Advantage    *autograd.Var
 	ReturnTarget *autograd.Var
 
-	Loss  *autograd.Var
-	Graph *autograd.Graph
+	Loss        *autograd.Var
+	Graph       *autograd.Graph
+	PolicyGraph *autograd.Graph
+	ValueGraph  *autograd.Graph
 }
 
 // NewTrainingNetwork builds a TrainingNetwork over actorParams, fixing
@@ -57,7 +59,15 @@ func NewTrainingNetwork(actorParams *actorcritic.Params, cfg LossConfig) (*Train
 	advantage := autograd.NewVar(outputSize, 1, autograd.FlagNone)
 	returnTarget := autograd.NewVar(1, 1, autograd.FlagNone)
 
-	loss, err := buildLoss(actor.PolicyOutput, actor.ValueOutput, actionMask, oldLogProb, advantage, returnTarget, cfg)
+	policyLoss, valueLoss, entropyBonus, err := buildLossComponents(actor.PolicyOutput, actor.ValueOutput, actionMask, oldLogProb, advantage, returnTarget, cfg)
+	if err != nil {
+		return nil, err
+	}
+	loss, err := combineObjectiveLosses(policyLoss, valueLoss, entropyBonus)
+	if err != nil {
+		return nil, err
+	}
+	policyObjective, err := autograd.Sub(policyLoss, entropyBonus)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +80,8 @@ func NewTrainingNetwork(actorParams *actorcritic.Params, cfg LossConfig) (*Train
 		ReturnTarget: returnTarget,
 		Loss:         loss,
 		Graph:        autograd.BuildGraph(loss),
+		PolicyGraph:  autograd.BuildGraph(policyObjective),
+		ValueGraph:   autograd.BuildGraph(valueLoss),
 	}, nil
 }
 

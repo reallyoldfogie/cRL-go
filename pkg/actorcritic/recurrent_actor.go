@@ -87,6 +87,8 @@ func (a *RecurrentActor) Refresh(live *RecurrentParams) error {
 func (a *RecurrentActor) Reset() {
 	a.net.HPrevIn.Val.Clear()
 	a.net.CPrevIn.Val.Clear()
+	a.net.ValueHPrevIn.Val.Clear()
+	a.net.ValueCPrevIn.Val.Clear()
 }
 
 // Act builds on the Actor's persistent RecurrentInferenceNetwork, runs
@@ -106,6 +108,8 @@ func (a *RecurrentActor) Act(obs rl.Observation, mask []bool, rng *rand.Rand) (r
 	}
 	copy(net.HPrevIn.Val.Data, net.HOut.Val.Data)
 	copy(net.CPrevIn.Val.Data, net.COut.Val.Data)
+	copy(net.ValueHPrevIn.Val.Data, net.ValueHOut.Val.Data)
+	copy(net.ValueCPrevIn.Val.Data, net.ValueCOut.Val.Data)
 	return action, nil
 }
 
@@ -130,5 +134,7 @@ func (a *RecurrentActor) ActWithInfo(obs rl.Observation, mask []bool, rng *rand.
 	}
 	copy(net.HPrevIn.Val.Data, net.HOut.Val.Data)
 	copy(net.CPrevIn.Val.Data, net.COut.Val.Data)
+	copy(net.ValueHPrevIn.Val.Data, net.ValueHOut.Val.Data)
+	copy(net.ValueCPrevIn.Val.Data, net.ValueCOut.Val.Data)
 	return decision, nil
 }

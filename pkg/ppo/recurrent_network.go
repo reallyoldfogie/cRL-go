@@ -43,8 +43,10 @@ type RecurrentTrainingNetwork struct {
 	// entropy term into the combined loss without this.
 	StepMask []*autograd.Var
 
-	Loss  *autograd.Var
-	Graph *autograd.Graph
+	Loss        *autograd.Var
+	Graph       *autograd.Graph
+	PolicyGraph *autograd.Graph
+	ValueGraph  *autograd.Graph
 }
 
 // NewRecurrentTrainingNetwork builds a RecurrentTrainingNetwork over
@@ -63,7 +65,7 @@ func NewRecurrentTrainingNetwork(actorParams *actorcritic.RecurrentParams, chunk
 	returnTarget := make([]*autograd.Var, chunkLen)
 	stepMask := make([]*autograd.Var, chunkLen)
 
-	var combinedLoss *autograd.Var
+	var combinedLoss, policyLossTotal, valueLossTotal *autograd.Var
 	for t := range chunkLen {
 		actionMask[t] = autograd.NewVar(outputSize, 1, autograd.FlagNone)
 		oldLogProb[t] = autograd.NewVar(outputSize, 1, autograd.FlagNone)
@@ -71,7 +73,15 @@ func NewRecurrentTrainingNetwork(actorParams *actorcritic.RecurrentParams, chunk
 		returnTarget[t] = autograd.NewVar(1, 1, autograd.FlagNone)
 		stepMask[t] = autograd.NewVar(outputSize, 1, autograd.FlagNone)
 
-		stepLoss, err := buildLoss(actor.PolicyOutput[t], actor.ValueOutput[t], actionMask[t], oldLogProb[t], advantage[t], returnTarget[t], cfg)
+		policyLoss, valueLoss, entropyBonus, err := buildLossComponents(actor.PolicyOutput[t], actor.ValueOutput[t], actionMask[t], oldLogProb[t], advantage[t], returnTarget[t], cfg)
+		if err != nil {
+			return nil, err
+		}
+		policyStepLoss, err := autograd.Sub(policyLoss, entropyBonus)
+		if err != nil {
+			return nil, err
+		}
+		stepLoss, err := combineObjectiveLosses(policyLoss, valueLoss, entropyBonus)
 		if err != nil {
 			return nil, err
 		}
@@ -81,10 +91,29 @@ func NewRecurrentTrainingNetwork(actorParams *actorcritic.RecurrentParams, chunk
 			return nil, err
 		}
 
+		maskedPolicyLoss, err := autograd.Mul(policyStepLoss, stepMask[t])
+		if err != nil {
+			return nil, err
+		}
+		maskedValueLoss, err := autograd.Mul(valueLoss, stepMask[t])
+		if err != nil {
+			return nil, err
+		}
+
 		if combinedLoss == nil {
 			combinedLoss = maskedStepLoss
+			policyLossTotal = maskedPolicyLoss
+			valueLossTotal = maskedValueLoss
 		} else {
 			combinedLoss, err = autograd.Add(combinedLoss, maskedStepLoss)
+			if err != nil {
+				return nil, err
+			}
+			policyLossTotal, err = autograd.Add(policyLossTotal, maskedPolicyLoss)
+			if err != nil {
+				return nil, err
+			}
+			valueLossTotal, err = autograd.Add(valueLossTotal, maskedValueLoss)
 			if err != nil {
 				return nil, err
 			}
@@ -101,6 +130,8 @@ func NewRecurrentTrainingNetwork(actorParams *actorcritic.RecurrentParams, chunk
 		StepMask:     stepMask,
 		Loss:         combinedLoss,
 		Graph:        autograd.BuildGraph(combinedLoss),
+		PolicyGraph:  autograd.BuildGraph(policyLossTotal),
+		ValueGraph:   autograd.BuildGraph(valueLossTotal),
 	}, nil
 }
 
@@ -126,6 +157,16 @@ type recurrentTrainingStep struct {
 // (recorded at rollout time — see RecurrentRollout).
 func (n *RecurrentTrainingNetwork) SetChunk(steps []recurrentTrainingStep, hPrevStart, cPrevStart []float32) {
 	n.Actor.SetChunkState(hPrevStart, cPrevStart)
+	n.setChunkData(steps)
+}
+
+// SetSplitChunk seeds the independent recurrent policy and value branches.
+func (n *RecurrentTrainingNetwork) SetSplitChunk(steps []recurrentTrainingStep, policyH, policyC, valueH, valueC []float32) {
+	n.Actor.SetSplitChunkState(policyH, policyC, valueH, valueC)
+	n.setChunkData(steps)
+}
+
+func (n *RecurrentTrainingNetwork) setChunkData(steps []recurrentTrainingStep) {
 
 	for t, step := range steps {
 		copy(n.Actor.Input[t].Val.Data, step.Observation.Values)

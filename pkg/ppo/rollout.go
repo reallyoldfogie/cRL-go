@@ -76,7 +76,7 @@ func collectTrajectoryFromEnv(ctx context.Context, params *actorcritic.Params, e
 		if err != nil {
 			return nil, fmt.Errorf("ppo: sampling action: %w", err)
 		}
-		logProbs = append(logProbs, actionLogProb(net.PolicyOutput.Val, action))
+		logProbs = append(logProbs, maskedActionLogProb(net.PolicyOutput.Val, mask, action))
 		values = append(values, net.ValueOutput.Val.Data[0])
 
 		result, err := env.Step(ctx, action)
@@ -104,6 +104,42 @@ func collectTrajectoryFromEnv(ctx context.Context, params *actorcritic.Params, e
 // actionLogProb returns log(max(probs[action], logProbEpsilon)).
 func actionLogProb(probs *mat.Matrix, action rl.Action) float32 {
 	probability := probs.Data[action]
+	if probability < logProbEpsilon {
+		probability = logProbEpsilon
+	}
+	return float32(math.Log(float64(probability)))
+}
+
+// maskedActionLogProb returns the log-probability from the same distribution
+// that SampleMaskedAction samples: illegal actions are removed and the legal
+// probabilities are renormalized. Recording the unnormalized network output
+// here would make every masked replay ratio systematically wrong.
+func maskedActionLogProb(probs *mat.Matrix, mask []bool, action rl.Action) float32 {
+	if len(mask) == 0 {
+		return actionLogProb(probs, action)
+	}
+	if int(action) < 0 || int(action) >= len(probs.Data) || int(action) >= len(mask) || !mask[action] {
+		return actionLogProb(probs, action)
+	}
+
+	var allowedSum float32
+	allowedCount := 0
+	allAllowed := true
+	for i, allowed := range mask {
+		if allowed {
+			if i < len(probs.Data) {
+				allowedSum += probs.Data[i]
+			}
+			allowedCount++
+		} else {
+			allAllowed = false
+		}
+	}
+	if allAllowed || allowedCount == 0 || allowedSum <= 0 {
+		return actionLogProb(probs, action)
+	}
+
+	probability := probs.Data[action] / allowedSum
 	if probability < logProbEpsilon {
 		probability = logProbEpsilon
 	}

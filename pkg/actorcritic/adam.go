@@ -1,6 +1,7 @@
 package actorcritic
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
@@ -47,6 +48,43 @@ type Adam struct {
 	moment1     []*mat.Matrix // first-moment (mean) estimate, one per parameter
 	moment2     []*mat.Matrix // second-moment (uncentered variance) estimate, one per parameter
 	stepCount   int
+}
+
+// AdamState is the serializable continuation state of Adam. It excludes
+// parameter values; model checkpoint formats own those. Older checkpoints
+// may omit this state, in which case callers leave a new optimizer at zero.
+type AdamState struct {
+	StepCount int         `json:"step_count"`
+	Moment1   [][]float32 `json:"moment1"`
+	Moment2   [][]float32 `json:"moment2"`
+}
+
+// State returns a deep copy of Adam's moments and bias-correction counter.
+func (a *Adam) State() AdamState {
+	state := AdamState{StepCount: a.stepCount, Moment1: make([][]float32, len(a.moment1)), Moment2: make([][]float32, len(a.moment2))}
+	for i := range a.moment1 {
+		state.Moment1[i] = append([]float32(nil), a.moment1[i].Data...)
+		state.Moment2[i] = append([]float32(nil), a.moment2[i].Data...)
+	}
+	return state
+}
+
+// RestoreState installs a previously saved continuation state.
+func (a *Adam) RestoreState(state AdamState) error {
+	if state.StepCount < 0 || len(state.Moment1) != len(a.parameters) || len(state.Moment2) != len(a.parameters) {
+		return fmt.Errorf("actorcritic: invalid Adam state shape")
+	}
+	for i, p := range a.parameters {
+		if len(state.Moment1[i]) != len(p.Val.Data) || len(state.Moment2[i]) != len(p.Val.Data) {
+			return fmt.Errorf("actorcritic: invalid Adam state tensor %d shape", i)
+		}
+	}
+	for i := range a.moment1 {
+		copy(a.moment1[i].Data, state.Moment1[i])
+		copy(a.moment2[i].Data, state.Moment2[i])
+	}
+	a.stepCount = state.StepCount
+	return nil
 }
 
 // NewAdam builds an Adam optimizer for parameters (e.g.
@@ -138,6 +176,35 @@ func (a *Adam) Step(sampleCount int) {
 			p.Val.Data[j] -= a.learningRate * moment1Hat / (float32(math.Sqrt(float64(moment2Hat))) + epsilon)
 		}
 	}
+}
+
+// GradientNorm returns the L2 norm of the gradient after the same
+// sample-count averaging Step applies, but before maxGradNorm clipping.
+// It is intended for training diagnostics; it does not mutate optimizer
+// state or parameters.
+func (a *Adam) GradientNorm(sampleCount int) float32 {
+	if sampleCount <= 0 {
+		return 0
+	}
+	scale := 1 / float32(sampleCount)
+	var sumSquares float64
+	for _, p := range a.parameters {
+		for _, g := range p.Grad.Data {
+			scaled := float64(g * scale)
+			sumSquares += scaled * scaled
+		}
+	}
+	return float32(math.Sqrt(sumSquares))
+}
+
+// AppliedGradientNorm returns the norm after sample-count averaging and the
+// configured maxGradNorm clipping that Step applies.
+func (a *Adam) AppliedGradientNorm(sampleCount int) float32 {
+	norm := a.GradientNorm(sampleCount)
+	if a.maxGradNorm > 0 && norm > a.maxGradNorm {
+		return a.maxGradNorm
+	}
+	return norm
 }
 
 // clipScale returns the additional factor (<=1; 1 if already within

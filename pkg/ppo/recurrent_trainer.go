@@ -180,6 +180,14 @@ func (tr *RecurrentTrainer) Params() *actorcritic.RecurrentParams {
 	return tr.params
 }
 
+// OptimizerState returns the Adam continuation state for checkpointing.
+func (tr *RecurrentTrainer) OptimizerState() actorcritic.AdamState { return tr.adam.State() }
+
+// RestoreOptimizerState restores Adam moments from a compatible checkpoint.
+func (tr *RecurrentTrainer) RestoreOptimizerState(state actorcritic.AdamState) error {
+	return tr.adam.RestoreState(state)
+}
+
 // RunEpoch runs one full recurrent-PPO training epoch and returns
 // summary statistics, mirroring Trainer.RunEpoch's own doc comment.
 func (tr *RecurrentTrainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) {
@@ -190,8 +198,10 @@ func (tr *RecurrentTrainer) RunEpoch(ctx context.Context, epoch int) (EpochStats
 
 	var chunks []recurrentChunk
 	var returnSum float32
+	var rawAdvantages []float32
 	for _, rollout := range rollouts {
 		advantages, returns := ComputeGAE(rollout.Rollout, tr.settings.Gamma, tr.settings.GAELambda)
+		rawAdvantages = append(rawAdvantages, advantages...)
 		chunks = append(chunks, chunkRollout(rollout, advantages, returns, tr.settings.RecurrentChunkLen, tr.params.InputSize())...)
 		if len(returns) > 0 {
 			returnSum += returns[0]
@@ -202,6 +212,7 @@ func (tr *RecurrentTrainer) RunEpoch(ctx context.Context, epoch int) (EpochStats
 
 	shuffleRNG := reinforce.WorkerRNG(tr.settings.Seed, epoch, shuffleWorkerIndex)
 	updateCount := 0
+	var diagnostics epochDiagnostics
 	for range tr.settings.PPOEpochs {
 		shuffleRNG.Shuffle(len(chunks), func(i, j int) {
 			chunks[i], chunks[j] = chunks[j], chunks[i]
@@ -211,17 +222,39 @@ func (tr *RecurrentTrainer) RunEpoch(ctx context.Context, epoch int) (EpochStats
 			end := min(start+tr.settings.MinibatchSize, len(chunks))
 
 			tr.params.Lock()
-			tr.trainOnChunkMinibatch(chunks[start:end])
+			diagnosticsForBatch := tr.trainOnChunkMinibatch(chunks[start:end])
 			tr.params.Unlock()
+			diagnostics.policyLossSum += diagnosticsForBatch.policyLossSum
+			diagnostics.valueLossSum += diagnosticsForBatch.valueLossSum
+			diagnostics.entropySum += diagnosticsForBatch.entropySum
+			diagnostics.steps += diagnosticsForBatch.steps
+			diagnostics.gradientNormSum += diagnosticsForBatch.gradientNormSum
+			diagnostics.appliedNormSum += diagnosticsForBatch.appliedNormSum
+			diagnostics.policyGradNormSum += diagnosticsForBatch.policyGradNormSum
+			diagnostics.valueGradNormSum += diagnosticsForBatch.valueGradNormSum
+			diagnostics.updates += diagnosticsForBatch.updates
 			updateCount++
 		}
 	}
 
+	policyLoss, valueLoss, entropy, gradientNorm, appliedNorm, policyGradientNorm, valueGradientNorm := diagnostics.averages()
+	advantageMean, advantageStd, advantageMin, advantageMax := finishAdvantageStats(rawAdvantages)
 	return EpochStats{
-		Epoch:         epoch,
-		AverageReturn: returnSum / float32(len(rollouts)),
-		SampleCount:   len(chunks) * tr.settings.RecurrentChunkLen,
-		UpdateCount:   updateCount,
+		Epoch:               epoch,
+		AverageReturn:       returnSum / float32(len(rollouts)),
+		SampleCount:         recurrentRealStepCount(chunks),
+		UpdateCount:         updateCount,
+		PolicyLoss:          policyLoss,
+		ValueLoss:           valueLoss,
+		Entropy:             entropy,
+		AdvantageMean:       advantageMean,
+		AdvantageStd:        advantageStd,
+		AdvantageMin:        advantageMin,
+		AdvantageMax:        advantageMax,
+		GradientNorm:        gradientNorm,
+		AppliedGradientNorm: appliedNorm,
+		PolicyGradientNorm:  policyGradientNorm,
+		ValueGradientNorm:   valueGradientNorm,
 	}, nil
 }
 
@@ -333,28 +366,71 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, ep
 
 // trainOnChunkMinibatch replays every chunk in minibatch through the
 // shared RecurrentTrainingNetwork sequentially, accumulating gradients,
-// then applies one Adam step averaged over len(minibatch) — the chunk
-// count, not the real-step count (padding's zeroed contribution makes
-// this a negligible simplification, not a correctness issue: it affects
-// at most ChunkLen-1 padded steps once per rollout).
-func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) {
-	tr.network.Actor.ZeroGrad()
+// then applies one Adam step averaged over the real timestep count. The
+// objective-only passes are diagnostics; the final combined pass is the
+// gradient actually applied by Adam.
+func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) epochDiagnostics {
+	var diagnostics epochDiagnostics
+	cfg := LossConfig{ClipEpsilon: tr.settings.ClipEpsilon, EntropyCoef: tr.settings.EntropyCoef, ValueCoef: tr.settings.ValueCoef}
+	realSteps := recurrentRealStepCount(minibatch)
+	if realSteps == 0 {
+		return diagnostics
+	}
 
+	tr.network.Actor.ZeroGrad()
 	for _, chunk := range minibatch {
-		tr.network.SetChunk(chunk.Steps, chunk.HPrevStart, chunk.CPrevStart)
+		tr.network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
+		tr.network.PolicyGraph.Forward()
+		tr.network.PolicyGraph.Backward()
+	}
+	policyGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), realSteps)
+
+	tr.network.Actor.ZeroGrad()
+	for _, chunk := range minibatch {
+		tr.network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
+		tr.network.ValueGraph.Forward()
+		tr.network.ValueGraph.Backward()
+	}
+	valueGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), realSteps)
+
+	tr.network.Actor.ZeroGrad()
+	for _, chunk := range minibatch {
+		tr.network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
 		tr.network.Graph.Forward()
+		for t, step := range chunk.Steps {
+			if !step.Real {
+				continue
+			}
+			diagnostics.observeStep(tr.network.Actor.PolicyOutput[t].Val.Data, tr.network.Actor.ValueOutput[t].Val.Data[0], step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
+		}
 		tr.network.Graph.Backward()
 	}
 
-	tr.adam.Step(len(minibatch))
+	diagnostics.observeUpdate(tr.adam.GradientNorm(realSteps), tr.adam.AppliedGradientNorm(realSteps), policyGradientNorm, valueGradientNorm)
+	tr.adam.Step(realSteps)
+	return diagnostics
+}
+
+func recurrentRealStepCount(chunks []recurrentChunk) int {
+	count := 0
+	for _, chunk := range chunks {
+		for _, step := range chunk.Steps {
+			if step.Real {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // recurrentChunk is one contiguous, fixed-length (ChunkLen) window of
 // one rollout's steps, self-contained with its own starting hidden/cell
 // state — see chunkRollout.
 type recurrentChunk struct {
-	Steps                  []recurrentTrainingStep
-	HPrevStart, CPrevStart []float32
+	Steps                              []recurrentTrainingStep
+	HPrevStart, CPrevStart             []float32
+	PolicyHPrevStart, PolicyCPrevStart []float32
+	ValueHPrevStart, ValueCPrevStart   []float32
 }
 
 // chunkRollout slices rollout's transitions into contiguous,
@@ -394,10 +470,16 @@ func chunkRollout(rollout *RecurrentRollout, advantages, returns []float32, chun
 			}
 		}
 
+		valueHStart, valueCStart := rollout.HPrevs[start], rollout.CPrevs[start]
+		if len(rollout.ValueHPrevs) == len(rollout.HPrevs) {
+			valueHStart, valueCStart = rollout.ValueHPrevs[start], rollout.ValueCPrevs[start]
+		}
 		chunks = append(chunks, recurrentChunk{
-			Steps:      steps,
-			HPrevStart: rollout.HPrevs[start],
-			CPrevStart: rollout.CPrevs[start],
+			Steps:            steps,
+			HPrevStart:       rollout.HPrevs[start],
+			CPrevStart:       rollout.CPrevs[start],
+			PolicyHPrevStart: rollout.HPrevs[start], PolicyCPrevStart: rollout.CPrevs[start],
+			ValueHPrevStart: valueHStart, ValueCPrevStart: valueCStart,
 		})
 	}
 	return chunks

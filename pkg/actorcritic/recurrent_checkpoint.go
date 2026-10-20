@@ -19,7 +19,7 @@ type RecurrentCheckpointSchemaVersion int
 
 // recurrentCheckpointSchemaVersionCurrent is the only schema version
 // this file has ever written.
-const recurrentCheckpointSchemaVersionCurrent RecurrentCheckpointSchemaVersion = 1
+const recurrentCheckpointSchemaVersionCurrent RecurrentCheckpointSchemaVersion = 2
 
 // lstmLayerData is the on-disk JSON representation of an LSTMLayer's
 // flattened weight/bias data.
@@ -60,7 +60,35 @@ type recurrentCheckpointData struct {
 	Wv  []float32 `json:"wv"`
 	Bv  []float32 `json:"bv"`
 
-	LSTM lstmLayerData `json:"lstm"`
+	LSTM       lstmLayerData       `json:"lstm"`
+	Policy     *recurrentTrunkData `json:"policy,omitempty"`
+	Value      *recurrentTrunkData `json:"value,omitempty"`
+	PolicyLSTM *lstmLayerData      `json:"policy_lstm,omitempty"`
+	ValueLSTM  *lstmLayerData      `json:"value_lstm,omitempty"`
+}
+
+type recurrentTrunkData struct {
+	Hidden []hiddenLayerData `json:"hidden"`
+	Wpi    []float32         `json:"wpi"`
+	Bpi    []float32         `json:"bpi"`
+	Wv     []float32         `json:"wv"`
+	Bv     []float32         `json:"bv"`
+}
+
+func recurrentTrunkDataFromParams(p *Params) *recurrentTrunkData {
+	hidden := make([]hiddenLayerData, len(p.Hidden))
+	for i, layer := range p.Hidden {
+		hidden[i] = hiddenLayerData{W: layer.W.Data, B: layer.B.Data}
+	}
+	return &recurrentTrunkData{Hidden: hidden, Wpi: p.Wpi.Data, Bpi: p.Bpi.Data, Wv: p.Wv.Data, Bv: p.Bv.Data}
+}
+
+func checkpointDataFromRecurrentTrunk(data *recurrentTrunkData, inputSize, hiddenSize, outputSize int) checkpointData {
+	return checkpointData{InputSize: inputSize, HiddenSize: hiddenSize, OutputSize: outputSize, Hidden: data.Hidden, Wpi: data.Wpi, Bpi: data.Bpi, Wv: data.Wv, Bv: data.Bv}
+}
+
+func lstmDataFromLayer(l *LSTMLayer) *lstmLayerData {
+	return &lstmLayerData{WxF: l.WxF.Data, WhF: l.WhF.Data, BF: l.BF.Data, WxI: l.WxI.Data, WhI: l.WhI.Data, BI: l.BI.Data, WxO: l.WxO.Data, WhO: l.WhO.Data, BO: l.BO.Data, WxG: l.WxG.Data, WhG: l.WhG.Data, BG: l.BG.Data}
 }
 
 // Save writes p's learned weights and biases (both Trunk's and LSTM's)
@@ -90,6 +118,10 @@ func (p *RecurrentParams) Save(w io.Writer, environmentID string, metadata check
 			WxO: p.LSTM.WxO.Data, WhO: p.LSTM.WhO.Data, BO: p.LSTM.BO.Data,
 			WxG: p.LSTM.WxG.Data, WhG: p.LSTM.WhG.Data, BG: p.LSTM.BG.Data,
 		},
+		Policy:     recurrentTrunkDataFromParams(p.policyTrunk()),
+		Value:      recurrentTrunkDataFromParams(p.valueTrunk()),
+		PolicyLSTM: lstmDataFromLayer(p.policyLSTM()),
+		ValueLSTM:  lstmDataFromLayer(p.valueLSTM()),
 	}
 
 	if err := json.NewEncoder(w).Encode(data); err != nil {
@@ -109,7 +141,7 @@ func RecurrentLoad(r io.Reader, expectedEnvironmentID string) (*RecurrentParams,
 	if err := json.NewDecoder(r).Decode(&data); err != nil {
 		return nil, checkpoint.Metadata{}, fmt.Errorf("actorcritic: loading recurrent checkpoint: %w", err)
 	}
-	if data.SchemaVersion != recurrentCheckpointSchemaVersionCurrent {
+	if data.SchemaVersion != 1 && data.SchemaVersion != recurrentCheckpointSchemaVersionCurrent {
 		return nil, checkpoint.Metadata{}, fmt.Errorf(
 			"actorcritic: loading recurrent checkpoint: unsupported schema version %d",
 			data.SchemaVersion,
@@ -122,26 +154,33 @@ func RecurrentLoad(r io.Reader, expectedEnvironmentID string) (*RecurrentParams,
 		)
 	}
 
-	trunkParams, err := paramsFromCheckpointData(checkpointData{
-		InputSize:  data.InputSize,
-		HiddenSize: data.HiddenSize,
-		OutputSize: data.OutputSize,
-		Hidden:     data.Hidden,
-		Wpi:        data.Wpi,
-		Bpi:        data.Bpi,
-		Wv:         data.Wv,
-		Bv:         data.Bv,
-	})
+	policyData := &recurrentTrunkData{Hidden: data.Hidden, Wpi: data.Wpi, Bpi: data.Bpi, Wv: data.Wv, Bv: data.Bv}
+	valueData := policyData
+	policyLSTMData := data.LSTM
+	valueLSTMData := data.LSTM
+	if data.SchemaVersion >= 2 && data.Policy != nil && data.Value != nil && data.PolicyLSTM != nil && data.ValueLSTM != nil {
+		policyData, valueData = data.Policy, data.Value
+		policyLSTMData, valueLSTMData = *data.PolicyLSTM, *data.ValueLSTM
+	}
+	policyParams, err := paramsFromCheckpointData(checkpointDataFromRecurrentTrunk(policyData, data.InputSize, data.HiddenSize, data.OutputSize))
+	if err != nil {
+		return nil, checkpoint.Metadata{}, err
+	}
+	valueParams, err := paramsFromCheckpointData(checkpointDataFromRecurrentTrunk(valueData, data.InputSize, data.HiddenSize, data.OutputSize))
 	if err != nil {
 		return nil, checkpoint.Metadata{}, err
 	}
 
-	lstm, err := lstmLayerFromCheckpointData(data.LSTM, data.HiddenSize)
+	policyLSTM, err := lstmLayerFromCheckpointData(policyLSTMData, data.HiddenSize)
+	if err != nil {
+		return nil, checkpoint.Metadata{}, err
+	}
+	valueLSTM, err := lstmLayerFromCheckpointData(valueLSTMData, data.HiddenSize)
 	if err != nil {
 		return nil, checkpoint.Metadata{}, err
 	}
 
-	return &RecurrentParams{Trunk: trunkParams, LSTM: lstm}, data.Metadata, nil
+	return &RecurrentParams{Trunk: policyParams, LSTM: policyLSTM, PolicyTrunk: policyParams, ValueTrunk: valueParams, PolicyLSTM: policyLSTM, ValueLSTM: valueLSTM}, data.Metadata, nil
 }
 
 // lstmLayerFromCheckpointData reconstructs an LSTMLayer from data, every

@@ -139,14 +139,18 @@ func buildRecurrentForward(trunkInput *autograd.Var, pv paramVars, hPrev, cPrev 
 // step's HOut/COut into the next step's HPrevIn/CPrevIn (both zeroed at
 // episode start) between Forward calls.
 type RecurrentInferenceNetwork struct {
-	Input   *autograd.Var
-	HPrevIn *autograd.Var
-	CPrevIn *autograd.Var
+	Input                        *autograd.Var
+	PolicyHPrevIn, PolicyCPrevIn *autograd.Var
+	ValueHPrevIn, ValueCPrevIn   *autograd.Var
+	HPrevIn                      *autograd.Var
+	CPrevIn                      *autograd.Var
 
-	PolicyOutput *autograd.Var
-	ValueOutput  *autograd.Var
-	HOut         *autograd.Var
-	COut         *autograd.Var
+	PolicyOutput           *autograd.Var
+	ValueOutput            *autograd.Var
+	HOut                   *autograd.Var
+	COut                   *autograd.Var
+	PolicyHOut, PolicyCOut *autograd.Var
+	ValueHOut, ValueCOut   *autograd.Var
 
 	Graph *autograd.Graph
 }
@@ -155,26 +159,31 @@ type RecurrentInferenceNetwork struct {
 // params.
 func NewRecurrentInferenceNetwork(params *RecurrentParams) (*RecurrentInferenceNetwork, error) {
 	input := autograd.NewVar(params.InputSize(), 1, autograd.FlagNone)
-	hPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
-	cPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	policyHPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	policyCPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	valueHPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	valueCPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
 
-	pv := buildParamVars(params.Trunk, autograd.Constant)
-	lv := buildLSTMVars(params.LSTM, autograd.Constant)
-
-	policyOutput, valueOutput, hOut, cOut, err := buildRecurrentForward(input, pv, hPrevIn, cPrevIn, lv, nil)
+	policyOutput, _, policyHOut, policyCOut, err := buildRecurrentForward(input, buildParamVars(params.policyTrunk(), autograd.Constant), policyHPrevIn, policyCPrevIn, buildLSTMVars(params.policyLSTM(), autograd.Constant), nil)
+	if err != nil {
+		return nil, err
+	}
+	_, valueOutput, valueHOut, valueCOut, err := buildRecurrentForward(input, buildParamVars(params.valueTrunk(), autograd.Constant), valueHPrevIn, valueCPrevIn, buildLSTMVars(params.valueLSTM(), autograd.Constant), nil)
 	if err != nil {
 		return nil, err
 	}
 
 	return &RecurrentInferenceNetwork{
-		Input:        input,
-		HPrevIn:      hPrevIn,
-		CPrevIn:      cPrevIn,
+		Input:         input,
+		PolicyHPrevIn: policyHPrevIn, PolicyCPrevIn: policyCPrevIn,
+		ValueHPrevIn: valueHPrevIn, ValueCPrevIn: valueCPrevIn,
+		HPrevIn: policyHPrevIn, CPrevIn: policyCPrevIn,
 		PolicyOutput: policyOutput,
 		ValueOutput:  valueOutput,
-		HOut:         hOut,
-		COut:         cOut,
-		Graph:        autograd.BuildGraphMulti(policyOutput, valueOutput, hOut, cOut),
+		HOut:         policyHOut, COut: policyCOut,
+		PolicyHOut: policyHOut, PolicyCOut: policyCOut,
+		ValueHOut: valueHOut, ValueCOut: valueCOut,
+		Graph: autograd.BuildGraphMulti(policyOutput, valueOutput, policyHOut, policyCOut, valueHOut, valueCOut),
 	}, nil
 }
 
@@ -212,15 +221,21 @@ type RecurrentChunkTrainingNetwork struct {
 	// HPrevIn, CPrevIn are the chunk's starting hidden/cell state — fed
 	// in once, not per-timestep, since every later timestep's state
 	// flows through the unrolled graph's own edges.
-	HPrevIn, CPrevIn *autograd.Var
+	HPrevIn, CPrevIn             *autograd.Var
+	PolicyHPrevIn, PolicyCPrevIn *autograd.Var
+	ValueHPrevIn, ValueCPrevIn   *autograd.Var
 
 	// PolicyOutput, ValueOutput are the per-timestep head outputs a
 	// caller composes a loss on top of, length ChunkLen.
-	PolicyOutput []*autograd.Var
-	ValueOutput  []*autograd.Var
+	PolicyOutput           []*autograd.Var
+	ValueOutput            []*autograd.Var
+	PolicyHOut, PolicyCOut []*autograd.Var
+	ValueHOut, ValueCOut   []*autograd.Var
 
-	params paramVars
-	lstm   lstmVars
+	params      paramVars
+	lstm        lstmVars
+	valueParams paramVars
+	valueLSTM   lstmVars
 }
 
 // NewRecurrentChunkTrainingNetwork builds a RecurrentChunkTrainingNetwork
@@ -230,30 +245,42 @@ func NewRecurrentChunkTrainingNetwork(params *RecurrentParams, chunkLen int) (*R
 		return nil, fmt.Errorf("actorcritic: NewRecurrentChunkTrainingNetwork: chunkLen must be at least 1, got %d", chunkLen)
 	}
 
-	pv := buildParamVars(params.Trunk, autograd.Parameter)
-	lv := buildLSTMVars(params.LSTM, autograd.Parameter)
+	policyParams := buildParamVars(params.policyTrunk(), autograd.Parameter)
+	valueParams := buildParamVars(params.valueTrunk(), autograd.Parameter)
+	policyLSTM := buildLSTMVars(params.policyLSTM(), autograd.Parameter)
+	valueLSTM := buildLSTMVars(params.valueLSTM(), autograd.Parameter)
 
-	hPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
-	cPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	policyHPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	policyCPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	valueHPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
+	valueCPrevIn := autograd.NewVar(params.HiddenSize(), 1, autograd.FlagNone)
 
 	n := &RecurrentChunkTrainingNetwork{
-		ChunkLen:     chunkLen,
-		Input:        make([]*autograd.Var, chunkLen),
-		MaskBias:     make([]*autograd.Var, chunkLen),
-		HPrevIn:      hPrevIn,
-		CPrevIn:      cPrevIn,
+		ChunkLen: chunkLen,
+		Input:    make([]*autograd.Var, chunkLen),
+		MaskBias: make([]*autograd.Var, chunkLen),
+		HPrevIn:  policyHPrevIn, CPrevIn: policyCPrevIn,
+		PolicyHPrevIn: policyHPrevIn, PolicyCPrevIn: policyCPrevIn,
+		ValueHPrevIn: valueHPrevIn, ValueCPrevIn: valueCPrevIn,
 		PolicyOutput: make([]*autograd.Var, chunkLen),
 		ValueOutput:  make([]*autograd.Var, chunkLen),
-		params:       pv,
-		lstm:         lv,
+		PolicyHOut:   make([]*autograd.Var, chunkLen), PolicyCOut: make([]*autograd.Var, chunkLen),
+		ValueHOut: make([]*autograd.Var, chunkLen), ValueCOut: make([]*autograd.Var, chunkLen),
+		params: policyParams, lstm: policyLSTM,
+		valueParams: valueParams, valueLSTM: valueLSTM,
 	}
 
-	h, c := hPrevIn, cPrevIn
+	policyH, policyC := policyHPrevIn, policyCPrevIn
+	valueH, valueC := valueHPrevIn, valueCPrevIn
 	for t := range chunkLen {
 		input := autograd.NewVar(params.InputSize(), 1, autograd.FlagNone)
 		maskBias := autograd.NewVar(params.OutputSize(), 1, autograd.FlagNone)
 
-		policyOutput, valueOutput, hOut, cOut, err := buildRecurrentForward(input, pv, h, c, lv, maskBias)
+		policyOutput, _, policyHOut, policyCOut, err := buildRecurrentForward(input, policyParams, policyH, policyC, policyLSTM, maskBias)
+		if err != nil {
+			return nil, err
+		}
+		_, valueOutput, valueHOut, valueCOut, err := buildRecurrentForward(input, valueParams, valueH, valueC, valueLSTM, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -262,7 +289,10 @@ func NewRecurrentChunkTrainingNetwork(params *RecurrentParams, chunkLen int) (*R
 		n.MaskBias[t] = maskBias
 		n.PolicyOutput[t] = policyOutput
 		n.ValueOutput[t] = valueOutput
-		h, c = hOut, cOut
+		n.PolicyHOut[t], n.PolicyCOut[t] = policyHOut, policyCOut
+		n.ValueHOut[t], n.ValueCOut[t] = valueHOut, valueCOut
+		policyH, policyC = policyHOut, policyCOut
+		valueH, valueC = valueHOut, valueCOut
 	}
 
 	return n, nil
@@ -285,6 +315,16 @@ func (n *RecurrentChunkTrainingNetwork) SetActionMask(t int, mask []bool) {
 func (n *RecurrentChunkTrainingNetwork) SetChunkState(hPrev, cPrev []float32) {
 	copy(n.HPrevIn.Val.Data, hPrev)
 	copy(n.CPrevIn.Val.Data, cPrev)
+	copy(n.ValueHPrevIn.Val.Data, hPrev)
+	copy(n.ValueCPrevIn.Val.Data, cPrev)
+}
+
+// SetSplitChunkState seeds the policy and value recurrent branches independently.
+func (n *RecurrentChunkTrainingNetwork) SetSplitChunkState(policyH, policyC, valueH, valueC []float32) {
+	copy(n.PolicyHPrevIn.Val.Data, policyH)
+	copy(n.PolicyCPrevIn.Val.Data, policyC)
+	copy(n.ValueHPrevIn.Val.Data, valueH)
+	copy(n.ValueCPrevIn.Val.Data, valueC)
 }
 
 // Parameters returns every one of the network's trainable weight and
@@ -293,7 +333,8 @@ func (n *RecurrentChunkTrainingNetwork) SetChunkState(hPrev, cPrev []float32) {
 // ChunkLen, since weights are shared/reused across timesteps rather than
 // duplicated per timestep.
 func (n *RecurrentChunkTrainingNetwork) Parameters() []*autograd.Var {
-	return append(n.params.all(), n.lstm.all()...)
+	params := append(n.params.all(), n.lstm.all()...)
+	return append(params, append(n.valueParams.all(), n.valueLSTM.all()...)...)
 }
 
 // ZeroGrad clears every parameter's accumulated gradient.

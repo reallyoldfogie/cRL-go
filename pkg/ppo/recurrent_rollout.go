@@ -28,8 +28,15 @@ import (
 // particular chunk length.
 type RecurrentRollout struct {
 	*Rollout
-	HPrevs [][]float32
-	CPrevs [][]float32
+	HPrevs      [][]float32
+	CPrevs      [][]float32
+	ValueHPrevs [][]float32
+	ValueCPrevs [][]float32
+	// PolicyOutputs and ValueOutputs are collection-time snapshots used by
+	// diagnostics/tests to verify that chunk replay starts from the exact
+	// recorded recurrent state and reconstructs the same actor-critic outputs.
+	PolicyOutputs [][]float32
+	ValueOutputs  []float32
 }
 
 // collectRecurrentTrajectory is collectTrajectory's recurrent
@@ -68,6 +75,10 @@ func collectRecurrentTrajectoryFromEnv(ctx context.Context, params *actorcritic.
 	values := make([]float32, 0, episodeLen)
 	hPrevs := make([][]float32, 0, episodeLen)
 	cPrevs := make([][]float32, 0, episodeLen)
+	valueHPrevs := make([][]float32, 0, episodeLen)
+	valueCPrevs := make([][]float32, 0, episodeLen)
+	policyOutputs := make([][]float32, 0, episodeLen)
+	valueOutputs := make([]float32, 0, episodeLen)
 
 	// h, c start zeroed (episode start); net.HPrevIn/CPrevIn are already
 	// zero-valued from NewRecurrentInferenceNetwork, so nothing to reset
@@ -75,6 +86,8 @@ func collectRecurrentTrajectoryFromEnv(ctx context.Context, params *actorcritic.
 	for range episodeLen {
 		hPrev := append([]float32(nil), net.HPrevIn.Val.Data...)
 		cPrev := append([]float32(nil), net.CPrevIn.Val.Data...)
+		valueHPrev := append([]float32(nil), net.ValueHPrevIn.Val.Data...)
+		valueCPrev := append([]float32(nil), net.ValueCPrevIn.Val.Data...)
 
 		copy(net.Input.Val.Data, observation.Values)
 		net.Graph.Forward()
@@ -88,10 +101,14 @@ func collectRecurrentTrajectoryFromEnv(ctx context.Context, params *actorcritic.
 		if err != nil {
 			return nil, fmt.Errorf("ppo: sampling action: %w", err)
 		}
-		logProbs = append(logProbs, actionLogProb(net.PolicyOutput.Val, action))
+		logProbs = append(logProbs, maskedActionLogProb(net.PolicyOutput.Val, mask, action))
 		values = append(values, net.ValueOutput.Val.Data[0])
+		policyOutputs = append(policyOutputs, append([]float32(nil), net.PolicyOutput.Val.Data...))
+		valueOutputs = append(valueOutputs, net.ValueOutput.Val.Data[0])
 		hPrevs = append(hPrevs, hPrev)
 		cPrevs = append(cPrevs, cPrev)
+		valueHPrevs = append(valueHPrevs, valueHPrev)
+		valueCPrevs = append(valueCPrevs, valueCPrev)
 
 		result, err := env.Step(ctx, action)
 		if err != nil {
@@ -109,6 +126,8 @@ func collectRecurrentTrajectoryFromEnv(ctx context.Context, params *actorcritic.
 		// Carry this step's output state into the next step's input.
 		copy(net.HPrevIn.Val.Data, net.HOut.Val.Data)
 		copy(net.CPrevIn.Val.Data, net.COut.Val.Data)
+		copy(net.ValueHPrevIn.Val.Data, net.ValueHOut.Val.Data)
+		copy(net.ValueCPrevIn.Val.Data, net.ValueCOut.Val.Data)
 
 		observation = result.Observation
 		if result.Done {
@@ -117,8 +136,12 @@ func collectRecurrentTrajectoryFromEnv(ctx context.Context, params *actorcritic.
 	}
 
 	return &RecurrentRollout{
-		Rollout: &Rollout{Episode: episode, LogProbs: logProbs, Values: values},
-		HPrevs:  hPrevs,
-		CPrevs:  cPrevs,
+		Rollout:       &Rollout{Episode: episode, LogProbs: logProbs, Values: values},
+		HPrevs:        hPrevs,
+		CPrevs:        cPrevs,
+		ValueHPrevs:   valueHPrevs,
+		ValueCPrevs:   valueCPrevs,
+		PolicyOutputs: policyOutputs,
+		ValueOutputs:  valueOutputs,
 	}, nil
 }

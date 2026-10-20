@@ -90,17 +90,30 @@ func (l *LSTMLayer) clone() *LSTMLayer {
 type RecurrentParams struct {
 	mu sync.RWMutex
 
+	// Trunk and LSTM are retained as compatibility aliases for callers and
+	// old checkpoints. New recurrent models use the four split fields below;
+	// Trunk/LSTM point at the policy branch.
 	Trunk *Params
 	LSTM  *LSTMLayer
+
+	PolicyTrunk *Params
+	ValueTrunk  *Params
+	PolicyLSTM  *LSTMLayer
+	ValueLSTM   *LSTMLayer
 }
 
 // NewRecurrentParams allocates a RecurrentParams for a network with the
 // given layer sizes: an inputSize/hiddenSize/outputSize/numHiddenLayers
 // Trunk (see NewParams) plus an LSTM layer sized hiddenSize x hiddenSize.
 func NewRecurrentParams(rng *rand.Rand, inputSize, hiddenSize, outputSize, numHiddenLayers int) *RecurrentParams {
+	policy := NewParams(rng, inputSize, hiddenSize, outputSize, numHiddenLayers)
+	value := NewParams(rng, inputSize, hiddenSize, outputSize, numHiddenLayers)
+	policyLSTM := NewLSTMLayer(rng, hiddenSize, hiddenSize)
+	valueLSTM := NewLSTMLayer(rng, hiddenSize, hiddenSize)
 	return &RecurrentParams{
-		Trunk: NewParams(rng, inputSize, hiddenSize, outputSize, numHiddenLayers),
-		LSTM:  NewLSTMLayer(rng, hiddenSize, hiddenSize),
+		Trunk: policy, LSTM: policyLSTM,
+		PolicyTrunk: policy, ValueTrunk: value,
+		PolicyLSTM: policyLSTM, ValueLSTM: valueLSTM,
 	}
 }
 
@@ -125,18 +138,48 @@ func NewRecurrentParams(rng *rand.Rand, inputSize, hiddenSize, outputSize, numHi
 // a recurrent network from scratch, just with a head start on the
 // per-step feature extraction the trunk already learned.
 func WarmStartRecurrentParams(trunk *Params, rng *rand.Rand) *RecurrentParams {
+	policy := trunk.Snapshot()
+	value := trunk.Snapshot()
+	policyLSTM := NewLSTMLayer(rng, trunk.HiddenSize(), trunk.HiddenSize())
+	valueLSTM := NewLSTMLayer(rng, trunk.HiddenSize(), trunk.HiddenSize())
 	return &RecurrentParams{
-		Trunk: trunk.Snapshot(),
-		LSTM:  NewLSTMLayer(rng, trunk.HiddenSize(), trunk.HiddenSize()),
+		Trunk: policy, LSTM: policyLSTM,
+		PolicyTrunk: policy, ValueTrunk: value,
+		PolicyLSTM: policyLSTM, ValueLSTM: valueLSTM,
 	}
 }
 
 // InputSize, HiddenSize, OutputSize, and NumHiddenLayers delegate to
 // Trunk; see Params' own identically-named methods.
-func (p *RecurrentParams) InputSize() int       { return p.Trunk.InputSize() }
-func (p *RecurrentParams) HiddenSize() int      { return p.Trunk.HiddenSize() }
-func (p *RecurrentParams) OutputSize() int      { return p.Trunk.OutputSize() }
-func (p *RecurrentParams) NumHiddenLayers() int { return p.Trunk.NumHiddenLayers() }
+func (p *RecurrentParams) policyTrunk() *Params {
+	if p.PolicyTrunk != nil {
+		return p.PolicyTrunk
+	}
+	return p.Trunk
+}
+func (p *RecurrentParams) valueTrunk() *Params {
+	if p.ValueTrunk != nil {
+		return p.ValueTrunk
+	}
+	return p.Trunk
+}
+func (p *RecurrentParams) policyLSTM() *LSTMLayer {
+	if p.PolicyLSTM != nil {
+		return p.PolicyLSTM
+	}
+	return p.LSTM
+}
+func (p *RecurrentParams) valueLSTM() *LSTMLayer {
+	if p.ValueLSTM != nil {
+		return p.ValueLSTM
+	}
+	return p.LSTM
+}
+
+func (p *RecurrentParams) InputSize() int       { return p.policyTrunk().InputSize() }
+func (p *RecurrentParams) HiddenSize() int      { return p.policyTrunk().HiddenSize() }
+func (p *RecurrentParams) OutputSize() int      { return p.policyTrunk().OutputSize() }
+func (p *RecurrentParams) NumHiddenLayers() int { return p.policyTrunk().NumHiddenLayers() }
 
 // Lock acquires p's write lock; see Params.Lock's own doc comment — the
 // same concurrent-snapshot-safety reasoning applies here, covering both
@@ -155,19 +198,9 @@ func (p *RecurrentParams) Snapshot() *RecurrentParams {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	hidden := make([]Layer, len(p.Trunk.Hidden))
-	for i, layer := range p.Trunk.Hidden {
-		hidden[i] = Layer{W: cloneMatrix(layer.W), B: cloneMatrix(layer.B)}
-	}
-
 	return &RecurrentParams{
-		Trunk: &Params{
-			Hidden: hidden,
-			Wpi:    cloneMatrix(p.Trunk.Wpi),
-			Bpi:    cloneMatrix(p.Trunk.Bpi),
-			Wv:     cloneMatrix(p.Trunk.Wv),
-			Bv:     cloneMatrix(p.Trunk.Bv),
-		},
-		LSTM: p.LSTM.clone(),
+		Trunk: p.policyTrunk().Snapshot(), LSTM: p.policyLSTM().clone(),
+		PolicyTrunk: p.policyTrunk().Snapshot(), ValueTrunk: p.valueTrunk().Snapshot(),
+		PolicyLSTM: p.policyLSTM().clone(), ValueLSTM: p.valueLSTM().clone(),
 	}
 }

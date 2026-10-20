@@ -118,22 +118,23 @@ func chunkNumericalGradient(x, output *autograd.Var, forward func()) *mat.Matrix
 // own doc comment for why staying near-linear matters for a numerical
 // gradient check specifically.
 func scaleRecurrentParams(p *RecurrentParams, factor float32) {
-	for _, layer := range p.Trunk.Hidden {
-		layer.W.Scale(factor)
-		layer.B.Scale(factor)
+	for _, trunk := range []*Params{p.policyTrunk(), p.valueTrunk()} {
+		for _, layer := range trunk.Hidden {
+			layer.W.Scale(factor)
+			layer.B.Scale(factor)
+		}
+		trunk.Wpi.Scale(factor)
+		trunk.Bpi.Scale(factor)
+		trunk.Wv.Scale(factor)
+		trunk.Bv.Scale(factor)
 	}
-	p.Trunk.Wpi.Scale(factor)
-	p.Trunk.Bpi.Scale(factor)
-	p.Trunk.Wv.Scale(factor)
-	p.Trunk.Bv.Scale(factor)
-
-	for _, m := range []*mat.Matrix{
-		p.LSTM.WxF, p.LSTM.WhF, p.LSTM.BF,
-		p.LSTM.WxI, p.LSTM.WhI, p.LSTM.BI,
-		p.LSTM.WxO, p.LSTM.WhO, p.LSTM.BO,
-		p.LSTM.WxG, p.LSTM.WhG, p.LSTM.BG,
-	} {
-		m.Scale(factor)
+	for _, lstm := range []*LSTMLayer{p.policyLSTM(), p.valueLSTM()} {
+		for _, m := range []*mat.Matrix{
+			lstm.WxF, lstm.WhF, lstm.BF, lstm.WxI, lstm.WhI, lstm.BI,
+			lstm.WxO, lstm.WhO, lstm.BO, lstm.WxG, lstm.WhG, lstm.BG,
+		} {
+			m.Scale(factor)
+		}
 	}
 	// The forget gate's bias is deliberately initialized to 1.0 rather
 	// than 0 (see NewLSTMLayer) — scale it down too rather than leave it
@@ -232,4 +233,56 @@ func TestRecurrentChunkTrainingNetworkApplyGradientStepUpdatesSharedWeightsOnce(
 	net.ApplyGradientStep(0.1, 1)
 
 	assert.NotEqual(t, before, params.LSTM.WxF.Data, "ApplyGradientStep should modify the shared LSTM weight exactly once, not ChunkLen times")
+}
+
+func TestSplitRecurrentObjectivesDoNotCrossUpdateBranches(t *testing.T) {
+	params := NewRecurrentParams(rand.New(rand.NewPCG(41, 42)), 4, 5, 3, 1)
+	net, err := NewRecurrentChunkTrainingNetwork(params, 1)
+	require.NoError(t, err)
+	net.Input[0].Val.Fill(0.25)
+	for _, trunk := range []*Params{params.policyTrunk(), params.valueTrunk()} {
+		for _, layer := range trunk.Hidden {
+			layer.B.Fill(1)
+		}
+	}
+
+	selected, err := autograd.MatMul(&autograd.Var{Val: &mat.Matrix{Rows: 1, Cols: 3, Data: []float32{1, 0, 0}}}, net.PolicyOutput[0])
+	require.NoError(t, err)
+	policyGraph := autograd.BuildGraph(selected)
+	policyGraph.Forward()
+	policyGraph.Backward()
+	policyParams := net.Parameters()
+	policyNonZero, valueNonZero := false, false
+	for i, p := range policyParams {
+		for _, g := range p.Grad.Data {
+			if g != 0 {
+				if i < len(policyParams)/2 {
+					policyNonZero = true
+				} else {
+					valueNonZero = true
+				}
+			}
+		}
+	}
+	assert.True(t, policyNonZero)
+	assert.False(t, valueNonZero)
+
+	net.ZeroGrad()
+	valueGraph := autograd.BuildGraph(net.ValueOutput[0])
+	valueGraph.Forward()
+	valueGraph.Backward()
+	policyNonZero, valueNonZero = false, false
+	for i, p := range policyParams {
+		for _, g := range p.Grad.Data {
+			if g != 0 {
+				if i < len(policyParams)/2 {
+					policyNonZero = true
+				} else {
+					valueNonZero = true
+				}
+			}
+		}
+	}
+	assert.False(t, policyNonZero)
+	assert.True(t, valueNonZero)
 }

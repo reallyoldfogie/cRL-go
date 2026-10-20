@@ -43,6 +43,19 @@ func TestAdamStepNoOpWithZeroSamples(t *testing.T) {
 	assert.Equal(t, float32(1.0), param.Val.Data[0])
 }
 
+func TestAdamStateRoundTripRestoresMomentsAndStepCount(t *testing.T) {
+	param := autograd.Parameter(&mat.Matrix{Rows: 1, Cols: 2, Data: []float32{1, 2}})
+	param.Grad.Data[0] = 2
+	param.Grad.Data[1] = 4
+	original := NewAdam([]*autograd.Var{param}, 0.1)
+	original.Step(1)
+	want := original.State()
+
+	restored := NewAdam([]*autograd.Var{autograd.Parameter(&mat.Matrix{Rows: 1, Cols: 2, Data: []float32{9, 9}})}, 0.1)
+	assert.NoError(t, restored.RestoreState(want))
+	assert.Equal(t, want, restored.State())
+}
+
 // TestAdamStepWithGradClipPreventsMomentContaminationFromAnOutlier
 // demonstrates why maxGradNorm matters beyond a single Step call: Adam's
 // per-parameter adaptive scaling makes any *single* step's own update

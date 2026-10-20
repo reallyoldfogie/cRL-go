@@ -33,29 +33,44 @@ func buildLoss(
 	actionMask, oldLogProb, advantage, returnTarget *autograd.Var,
 	cfg LossConfig,
 ) (*autograd.Var, error) {
+	policyLoss, valueLoss, entropyBonus, err := buildLossComponents(policyOutput, valueOutput, actionMask, oldLogProb, advantage, returnTarget, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return combineObjectiveLosses(policyLoss, valueLoss, entropyBonus)
+}
+
+func buildLossComponents(
+	policyOutput, valueOutput *autograd.Var,
+	actionMask, oldLogProb, advantage, returnTarget *autograd.Var,
+	cfg LossConfig,
+) (policyLoss, valueLoss, entropyBonus *autograd.Var, err error) {
 	probs := policyOutput
 	value := valueOutput
 
 	logProbsNew, err := autograd.Log(probs)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
-	policyLoss, err := buildPolicyLoss(logProbsNew, actionMask, oldLogProb, advantage, cfg.ClipEpsilon)
+	policyLoss, err = buildPolicyLoss(logProbsNew, actionMask, oldLogProb, advantage, cfg.ClipEpsilon)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
-	valueLoss, err := buildValueLoss(value, returnTarget, actionMask, cfg.ValueCoef)
+	valueLoss, err = buildValueLoss(value, returnTarget, actionMask, cfg.ValueCoef)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
-	entropyBonus, err := buildEntropyBonus(probs, logProbsNew, cfg.EntropyCoef)
+	entropyBonus, err = buildEntropyBonus(probs, logProbsNew, cfg.EntropyCoef)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
+	return policyLoss, valueLoss, entropyBonus, nil
+}
 
+func combineObjectiveLosses(policyLoss, valueLoss, entropyBonus *autograd.Var) (*autograd.Var, error) {
 	lossWithValue, err := autograd.Add(policyLoss, valueLoss)
 	if err != nil {
 		return nil, err

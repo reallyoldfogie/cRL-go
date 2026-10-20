@@ -23,6 +23,19 @@ type EpochStats struct {
 	// the collected steps into), so a caller accumulating it across
 	// epochs can populate a checkpoint.Metadata.TotalUpdates.
 	UpdateCount int
+	// PPO diagnostics averaged over this epoch. Losses and entropy are per
+	// real rollout step; gradient norms are per optimizer update.
+	PolicyLoss          float32
+	ValueLoss           float32
+	Entropy             float32
+	AdvantageMean       float32
+	AdvantageStd        float32
+	AdvantageMin        float32
+	AdvantageMax        float32
+	GradientNorm        float32
+	AppliedGradientNorm float32
+	PolicyGradientNorm  float32
+	ValueGradientNorm   float32
 }
 
 // Trainer runs the PPO training loop described in
@@ -238,6 +251,14 @@ func (tr *Trainer) Params() *actorcritic.Params {
 	return tr.params
 }
 
+// OptimizerState returns the Adam continuation state for checkpointing.
+func (tr *Trainer) OptimizerState() actorcritic.AdamState { return tr.adam.State() }
+
+// RestoreOptimizerState restores Adam moments from a compatible checkpoint.
+func (tr *Trainer) RestoreOptimizerState(state actorcritic.AdamState) error {
+	return tr.adam.RestoreState(state)
+}
+
 // RunEpoch runs one full PPO training epoch (rollout collection, GAE,
 // and settings.PPOEpochs shuffled-minibatch Adam updates) and returns
 // summary statistics. epoch is used only to derive this epoch's
@@ -259,10 +280,15 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 	}
 
 	steps := flattenSteps(scored)
+	var rawAdvantages []float32
+	for _, item := range scored {
+		rawAdvantages = append(rawAdvantages, item.Advantages...)
+	}
 	normalizeAdvantages(steps)
 
 	shuffleRNG := reinforce.WorkerRNG(tr.settings.Seed, epoch, shuffleWorkerIndex)
 	updateCount := 0
+	var diagnostics epochDiagnostics
 	for range tr.settings.PPOEpochs {
 		shuffleRNG.Shuffle(len(steps), func(i, j int) {
 			steps[i], steps[j] = steps[j], steps[i]
@@ -281,7 +307,16 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 			// partially-applied minibatch update. See
 			// docs/plans/09-concurrency-safe-live-inference.md.
 			tr.params.Lock()
-			tr.trainOnMinibatch(steps[start:end])
+			diagnosticsForBatch := tr.trainOnMinibatch(steps[start:end])
+			diagnostics.policyLossSum += diagnosticsForBatch.policyLossSum
+			diagnostics.valueLossSum += diagnosticsForBatch.valueLossSum
+			diagnostics.entropySum += diagnosticsForBatch.entropySum
+			diagnostics.steps += diagnosticsForBatch.steps
+			diagnostics.gradientNormSum += diagnosticsForBatch.gradientNormSum
+			diagnostics.appliedNormSum += diagnosticsForBatch.appliedNormSum
+			diagnostics.policyGradNormSum += diagnosticsForBatch.policyGradNormSum
+			diagnostics.valueGradNormSum += diagnosticsForBatch.valueGradNormSum
+			diagnostics.updates += diagnosticsForBatch.updates
 			tr.params.Unlock()
 			updateCount++
 		}
@@ -294,11 +329,24 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 		}
 	}
 
+	policyLoss, valueLoss, entropy, gradientNorm, appliedNorm, policyGradientNorm, valueGradientNorm := diagnostics.averages()
+	advantageMean, advantageStd, advantageMin, advantageMax := finishAdvantageStats(rawAdvantages)
 	return EpochStats{
-		Epoch:         epoch,
-		AverageReturn: returnSum / float32(len(scored)),
-		SampleCount:   len(steps),
-		UpdateCount:   updateCount,
+		Epoch:               epoch,
+		AverageReturn:       returnSum / float32(len(scored)),
+		SampleCount:         len(steps),
+		UpdateCount:         updateCount,
+		PolicyLoss:          policyLoss,
+		ValueLoss:           valueLoss,
+		Entropy:             entropy,
+		AdvantageMean:       advantageMean,
+		AdvantageStd:        advantageStd,
+		AdvantageMin:        advantageMin,
+		AdvantageMax:        advantageMax,
+		GradientNorm:        gradientNorm,
+		AppliedGradientNorm: appliedNorm,
+		PolicyGradientNorm:  policyGradientNorm,
+		ValueGradientNorm:   valueGradientNorm,
 	}, nil
 }
 
@@ -427,19 +475,47 @@ func (tr *Trainer) collectRolloutsPool(ctx context.Context, epoch int) ([]*Rollo
 // TrainingNetwork sequentially, accumulating gradients (see
 // autograd.Graph.Backward), then applies one Adam step averaged over
 // len(minibatch).
-func (tr *Trainer) trainOnMinibatch(minibatch []trainingStep) {
-	tr.network.Actor.ZeroGrad()
+func (tr *Trainer) trainOnMinibatch(minibatch []trainingStep) epochDiagnostics {
+	var diagnostics epochDiagnostics
+	cfg := LossConfig{ClipEpsilon: tr.settings.ClipEpsilon, EntropyCoef: tr.settings.EntropyCoef, ValueCoef: tr.settings.ValueCoef}
+	if len(minibatch) == 0 {
+		return diagnostics
+	}
 
+	tr.network.Actor.ZeroGrad()
+	for _, step := range minibatch {
+		copy(tr.network.Actor.Input.Val.Data, step.Observation.Values)
+		tr.network.Actor.SetActionMask(step.Mask)
+		tr.network.SetStep(step.Action, step.OldLogProb, step.Advantage, step.Return)
+		tr.network.PolicyGraph.Forward()
+		tr.network.PolicyGraph.Backward()
+	}
+	policyGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), len(minibatch))
+
+	tr.network.Actor.ZeroGrad()
+	for _, step := range minibatch {
+		copy(tr.network.Actor.Input.Val.Data, step.Observation.Values)
+		tr.network.Actor.SetActionMask(step.Mask)
+		tr.network.SetStep(step.Action, step.OldLogProb, step.Advantage, step.Return)
+		tr.network.ValueGraph.Forward()
+		tr.network.ValueGraph.Backward()
+	}
+	valueGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), len(minibatch))
+
+	tr.network.Actor.ZeroGrad()
 	for _, step := range minibatch {
 		copy(tr.network.Actor.Input.Val.Data, step.Observation.Values)
 		tr.network.Actor.SetActionMask(step.Mask)
 		tr.network.SetStep(step.Action, step.OldLogProb, step.Advantage, step.Return)
 
 		tr.network.Graph.Forward()
+		diagnostics.observeStep(tr.network.Actor.PolicyOutput.Val.Data, tr.network.Actor.ValueOutput.Val.Data[0], step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
 		tr.network.Graph.Backward()
 	}
 
+	diagnostics.observeUpdate(tr.adam.GradientNorm(len(minibatch)), tr.adam.AppliedGradientNorm(len(minibatch)), policyGradientNorm, valueGradientNorm)
 	tr.adam.Step(len(minibatch))
+	return diagnostics
 }
 
 // scoredRollout pairs a collected Rollout with its GAE advantages and

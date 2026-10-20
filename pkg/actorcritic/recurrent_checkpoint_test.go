@@ -2,6 +2,7 @@ package actorcritic
 
 import (
 	"bytes"
+	"encoding/json"
 	"math/rand/v2"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,25 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRecurrentLoadLegacySharedCheckpointDuplicatesBranches(t *testing.T) {
+	original := NewRecurrentParams(rand.New(rand.NewPCG(51, 52)), 5, 4, 3, 1)
+	var encoded bytes.Buffer
+	require.NoError(t, original.Save(&encoded, "legacy:1", checkpoint.Metadata{}))
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(encoded.Bytes(), &raw))
+	raw["schema_version"] = float64(1)
+	delete(raw, "policy")
+	delete(raw, "value")
+	delete(raw, "policy_lstm")
+	delete(raw, "value_lstm")
+	legacy, err := json.Marshal(raw)
+	require.NoError(t, err)
+	loaded, _, err := RecurrentLoad(bytes.NewReader(legacy), "legacy:1")
+	require.NoError(t, err)
+	assert.Equal(t, loaded.Trunk.Wpi.Data, loaded.ValueTrunk.Wpi.Data)
+	assert.Equal(t, loaded.LSTM.WxF.Data, loaded.ValueLSTM.WxF.Data)
+}
 
 func TestRecurrentSaveLoadRoundTripPreservesWeights(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
