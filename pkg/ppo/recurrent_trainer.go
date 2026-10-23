@@ -44,7 +44,18 @@ type RecurrentTrainer struct {
 
 	params  *actorcritic.RecurrentParams
 	network *RecurrentTrainingNetwork
-	adam    *actorcritic.Adam
+
+	// policyAdam and valueAdam clip and step the policy and value
+	// branches independently (each against settings.MaxGradNorm on only
+	// its own gradient), rather than sharing one Adam/clip over both
+	// branches' gradients combined — see trainOnChunkMinibatch. A value
+	// loss spike no longer shrinks the policy's own gradient along with
+	// it (and vice versa): the two branches never share a Var (see
+	// actorcritic.RecurrentChunkTrainingNetwork.PolicyParameters/
+	// ValueParameters), so there is nothing for a combined clip to have
+	// ever legitimately coupled.
+	policyAdam *actorcritic.Adam
+	valueAdam  *actorcritic.Adam
 }
 
 // NewRecurrent constructs a RecurrentTrainer from settings and
@@ -144,10 +155,11 @@ func newRecurrentTrainer(settings config.Settings, env rl.Environment, initRNG *
 	}
 
 	return &RecurrentTrainer{
-		settings: settings,
-		params:   params,
-		network:  network,
-		adam:     actorcritic.NewAdamWithGradClip(network.Actor.Parameters(), settings.LearningRate, settings.MaxGradNorm),
+		settings:   settings,
+		params:     params,
+		network:    network,
+		policyAdam: actorcritic.NewAdamWithGradClip(network.Actor.PolicyParameters(), settings.LearningRate, settings.MaxGradNorm),
+		valueAdam:  actorcritic.NewAdamWithGradClip(network.Actor.ValueParameters(), settings.LearningRate, settings.MaxGradNorm),
 	}, nil
 }
 
@@ -180,12 +192,39 @@ func (tr *RecurrentTrainer) Params() *actorcritic.RecurrentParams {
 	return tr.params
 }
 
-// OptimizerState returns the Adam continuation state for checkpointing.
-func (tr *RecurrentTrainer) OptimizerState() actorcritic.AdamState { return tr.adam.State() }
+// OptimizerState returns the Adam continuation state for checkpointing:
+// the policy and value optimizers' moments concatenated policy-then-value,
+// the same order Parameters() already lists them in, so this round-trips
+// through RestoreOptimizerState (including an older checkpoint saved
+// before the two branches had independent optimizers, since that single
+// combined state was built from this exact parameter order already).
+func (tr *RecurrentTrainer) OptimizerState() actorcritic.AdamState {
+	policy := tr.policyAdam.State()
+	value := tr.valueAdam.State()
+	return actorcritic.AdamState{
+		StepCount: policy.StepCount,
+		Moment1:   append(append([][]float32{}, policy.Moment1...), value.Moment1...),
+		Moment2:   append(append([][]float32{}, policy.Moment2...), value.Moment2...),
+	}
+}
 
-// RestoreOptimizerState restores Adam moments from a compatible checkpoint.
+// RestoreOptimizerState restores both optimizers' moments from a
+// compatible checkpoint, splitting the concatenated state at the policy
+// branch's parameter count — see OptimizerState.
 func (tr *RecurrentTrainer) RestoreOptimizerState(state actorcritic.AdamState) error {
-	return tr.adam.RestoreState(state)
+	policyCount := len(tr.network.Actor.PolicyParameters())
+	if len(state.Moment1) < policyCount || len(state.Moment2) < policyCount {
+		return fmt.Errorf("ppo: recurrent optimizer state has %d/%d tensors, need at least %d for the policy branch", len(state.Moment1), len(state.Moment2), policyCount)
+	}
+	policyState := actorcritic.AdamState{StepCount: state.StepCount, Moment1: state.Moment1[:policyCount], Moment2: state.Moment2[:policyCount]}
+	valueState := actorcritic.AdamState{StepCount: state.StepCount, Moment1: state.Moment1[policyCount:], Moment2: state.Moment2[policyCount:]}
+	if err := tr.policyAdam.RestoreState(policyState); err != nil {
+		return fmt.Errorf("ppo: restoring policy optimizer state: %w", err)
+	}
+	if err := tr.valueAdam.RestoreState(valueState); err != nil {
+		return fmt.Errorf("ppo: restoring value optimizer state: %w", err)
+	}
+	return nil
 }
 
 // RunEpoch runs one full recurrent-PPO training epoch and returns
@@ -365,10 +404,19 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, ep
 }
 
 // trainOnChunkMinibatch replays every chunk in minibatch through the
-// shared RecurrentTrainingNetwork sequentially, accumulating gradients,
-// then applies one Adam step averaged over the real timestep count. The
-// objective-only passes are diagnostics; the final combined pass is the
-// gradient actually applied by Adam.
+// shared RecurrentTrainingNetwork sequentially, accumulating gradients
+// from the one combined (policy + value + entropy) graph, then applies
+// an independent Adam step to each branch, each averaged over the real
+// timestep count and clipped against only its own gradient norm. Because
+// the policy and value branches never share a Var (see
+// actorcritic.RecurrentChunkTrainingNetwork.PolicyParameters/
+// ValueParameters), this one combined backward pass already leaves each
+// branch's .Grad holding exactly that branch's own gradient — reading
+// policyAdam/valueAdam's norms separately is exact, not an
+// approximation, so no separate objective-only backward pass is needed
+// to measure them (contrast Trainer.trainOnMinibatch, whose plain,
+// non-recurrent network does share its trunk between both heads and so
+// still needs one).
 func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) epochDiagnostics {
 	var diagnostics epochDiagnostics
 	cfg := LossConfig{ClipEpsilon: tr.settings.ClipEpsilon, EntropyCoef: tr.settings.EntropyCoef, ValueCoef: tr.settings.ValueCoef}
@@ -376,22 +424,6 @@ func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) ep
 	if realSteps == 0 {
 		return diagnostics
 	}
-
-	tr.network.Actor.ZeroGrad()
-	for _, chunk := range minibatch {
-		tr.network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
-		tr.network.PolicyGraph.Forward()
-		tr.network.PolicyGraph.Backward()
-	}
-	policyGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), realSteps)
-
-	tr.network.Actor.ZeroGrad()
-	for _, chunk := range minibatch {
-		tr.network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
-		tr.network.ValueGraph.Forward()
-		tr.network.ValueGraph.Backward()
-	}
-	valueGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), realSteps)
 
 	tr.network.Actor.ZeroGrad()
 	for _, chunk := range minibatch {
@@ -406,9 +438,24 @@ func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) ep
 		tr.network.Graph.Backward()
 	}
 
-	diagnostics.observeUpdate(tr.adam.GradientNorm(realSteps), tr.adam.AppliedGradientNorm(realSteps), policyGradientNorm, valueGradientNorm)
-	tr.adam.Step(realSteps)
+	policyGradientNorm := tr.policyAdam.GradientNorm(realSteps)
+	valueGradientNorm := tr.valueAdam.GradientNorm(realSteps)
+	policyAppliedNorm := tr.policyAdam.AppliedGradientNorm(realSteps)
+	valueAppliedNorm := tr.valueAdam.AppliedGradientNorm(realSteps)
+	diagnostics.observeUpdate(l2Combine(policyGradientNorm, valueGradientNorm), l2Combine(policyAppliedNorm, valueAppliedNorm), policyGradientNorm, valueGradientNorm)
+
+	tr.policyAdam.Step(realSteps)
+	tr.valueAdam.Step(realSteps)
 	return diagnostics
+}
+
+// l2Combine returns the L2 norm of the concatenation of two
+// independently-measured gradient norms (sqrt(a² + b²)) — exact, not an
+// approximation, because the policy and value branches' parameters are
+// disjoint, so this equals what a single optimizer spanning both
+// branches together would have reported for the whole network's norm.
+func l2Combine(a, b float32) float32 {
+	return float32(math.Sqrt(float64(a)*float64(a) + float64(b)*float64(b)))
 }
 
 func recurrentRealStepCount(chunks []recurrentChunk) int {

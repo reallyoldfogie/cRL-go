@@ -327,14 +327,30 @@ func (n *RecurrentChunkTrainingNetwork) SetSplitChunkState(policyH, policyC, val
 	copy(n.ValueCPrevIn.Val.Data, valueC)
 }
 
+// PolicyParameters returns only the policy branch's trainable Vars (its
+// trunk's and LSTM's) — the subset Parameters() lists first. Since the
+// policy and value branches never share a Var (see
+// NewRecurrentChunkTrainingNetwork), a caller can clip and step this
+// subset independently of ValueParameters without either branch's
+// gradient ever contaminating the other.
+func (n *RecurrentChunkTrainingNetwork) PolicyParameters() []*autograd.Var {
+	return append(n.params.all(), n.lstm.all()...)
+}
+
+// ValueParameters returns only the value branch's trainable Vars (its
+// trunk's and LSTM's) — the subset Parameters() lists second; see
+// PolicyParameters.
+func (n *RecurrentChunkTrainingNetwork) ValueParameters() []*autograd.Var {
+	return append(n.valueParams.all(), n.valueLSTM.all()...)
+}
+
 // Parameters returns every one of the network's trainable weight and
 // bias Vars (the trunk's and the LSTM's, the same set ZeroGrad and
 // ApplyGradientStep iterate internally) — fixed in number regardless of
 // ChunkLen, since weights are shared/reused across timesteps rather than
 // duplicated per timestep.
 func (n *RecurrentChunkTrainingNetwork) Parameters() []*autograd.Var {
-	params := append(n.params.all(), n.lstm.all()...)
-	return append(params, append(n.valueParams.all(), n.valueLSTM.all()...)...)
+	return append(n.PolicyParameters(), n.ValueParameters()...)
 }
 
 // ZeroGrad clears every parameter's accumulated gradient.

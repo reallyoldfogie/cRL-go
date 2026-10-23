@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
+	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 	"github.com/reallyoldfogie/cRL-go/pkg/snakeenv"
@@ -193,6 +194,115 @@ func TestChunkRolloutPadsAShortFinalChunkWithZeroedAdvantageSteps(t *testing.T) 
 	assert.Equal(t, float32(0), chunks[1].Steps[2].Advantage)
 	assert.Len(t, chunks[1].Steps[2].Observation.Values, 4, "a padded step's placeholder observation must still have the right InputSize")
 	assert.Equal(t, []float32{3, 3}, chunks[1].HPrevStart, "the second chunk starts from step 3's recorded incoming state")
+}
+
+// TestRecurrentPolicyAndValueAdamOperateOnDisjointParameters guards the
+// invariant trainOnChunkMinibatch's independent clipping depends on:
+// policyAdam and valueAdam must never share a *autograd.Var, and
+// stepping one must never move a weight that belongs to the other. A
+// future refactor that accidentally wires both optimizers to the same
+// parameter list (e.g. copy-pasting PolicyParameters() into both
+// newRecurrentTrainer calls) would still compile and still train
+// something, just silently back out this fix.
+func TestRecurrentPolicyAndValueAdamOperateOnDisjointParameters(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+	trainer, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+
+	policyParams := trainer.network.Actor.PolicyParameters()
+	valueParams := trainer.network.Actor.ValueParameters()
+	require.NotEmpty(t, policyParams)
+	require.NotEmpty(t, valueParams)
+
+	isPolicyVar := make(map[*autograd.Var]bool, len(policyParams))
+	for _, p := range policyParams {
+		isPolicyVar[p] = true
+	}
+	for _, v := range valueParams {
+		assert.False(t, isPolicyVar[v], "a value-branch parameter is also in the policy branch's parameter list")
+	}
+
+	beforeValue := make([]float32, 0)
+	for _, v := range valueParams {
+		beforeValue = append(beforeValue, append([]float32(nil), v.Val.Data...)...)
+	}
+
+	for _, p := range policyParams {
+		p.Grad.Fill(1000.0)
+	}
+	trainer.policyAdam.Step(1)
+
+	idx := 0
+	for _, v := range valueParams {
+		for _, got := range v.Val.Data {
+			assert.Equal(t, beforeValue[idx], got, "a value-branch weight moved after stepping only the policy optimizer")
+			idx++
+		}
+	}
+}
+
+// TestRecurrentPolicyGradientClipIsUnaffectedByAValueGradientOutlier is
+// the direct regression test for the bug docs/plans/21 left open: before
+// this fix, policy and value shared one Adam/clip over their combined
+// gradient, so a value-loss spike (observed live: value-gradient norms
+// roughly three orders of magnitude larger than policy's) forced one
+// shared clip-scale factor that shrank the policy's own, otherwise fine,
+// gradient right along with it. With independent optimizers, the
+// policy's own small gradient must be applied at its own, unclipped
+// scale regardless of how large the value branch's gradient is that
+// same step.
+func TestRecurrentPolicyGradientClipIsUnaffectedByAValueGradientOutlier(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+	settings.MaxGradNorm = 0.5
+	trainer, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+
+	policyParams := trainer.network.Actor.PolicyParameters()
+	valueParams := trainer.network.Actor.ValueParameters()
+	for _, p := range policyParams {
+		p.Grad.Fill(0.01)
+	}
+	for _, v := range valueParams {
+		v.Grad.Fill(1000.0)
+	}
+
+	policyNorm := trainer.policyAdam.GradientNorm(1)
+	require.Less(t, policyNorm, settings.MaxGradNorm, "test setup: the policy gradient must start below the clip, or this proves nothing")
+
+	assert.Equal(t, policyNorm, trainer.policyAdam.AppliedGradientNorm(1),
+		"the policy branch's own small gradient must not be clipped just because the value branch's gradient is huge")
+	assert.Equal(t, settings.MaxGradNorm, trainer.valueAdam.AppliedGradientNorm(1),
+		"the value branch's outlier gradient should still be clipped on its own")
+}
+
+// TestRecurrentOptimizerStateRoundTripsBothBranchesIndependently checks
+// OptimizerState/RestoreOptimizerState's concatenate-then-split: a
+// boundary computed wrong (off-by-one, or swapped halves) would still
+// often produce a state of the right total length, so this checks each
+// branch's own restored Adam state individually, not just that the
+// opaque combined blob round-trips byte-for-byte.
+func TestRecurrentOptimizerStateRoundTripsBothBranchesIndependently(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+	trainerA, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+
+	for _, p := range trainerA.network.Actor.PolicyParameters() {
+		p.Grad.Fill(0.3)
+	}
+	for _, v := range trainerA.network.Actor.ValueParameters() {
+		v.Grad.Fill(0.7)
+	}
+	trainerA.policyAdam.Step(1)
+	trainerA.valueAdam.Step(1)
+	savedState := trainerA.OptimizerState()
+
+	trainerB, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+	require.NoError(t, trainerB.RestoreOptimizerState(savedState))
+
+	assert.Equal(t, trainerA.policyAdam.State(), trainerB.policyAdam.State())
+	assert.Equal(t, trainerA.valueAdam.State(), trainerB.valueAdam.State())
+	assert.Equal(t, savedState, trainerB.OptimizerState())
 }
 
 func episodeOfLength(n int) *rl.Episode {
