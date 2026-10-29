@@ -126,16 +126,41 @@ func TestExpandRecurrentParamsPreservesOldLogitsAndLeavesLSTMUntouched(t *testin
 	// actual scalar value head, always width 1 regardless) - NewParams
 	// always allocates a full policy-shaped Wpi/Bpi even for a trunk
 	// only ever used for its Wv/Bv, and that allocation is simply
-	// unused dead weight here. ExpandRecurrentParams deliberately keeps
-	// it at its own prior size (passing the value trunk's own current
-	// OutputSize back in as "new"), since nothing reads it either way.
-	assert.Equal(t, oldOutputSize, expanded.ValueTrunk.OutputSize())
+	// unused dead weight here. It still has to track the policy trunk's
+	// own OutputSize, though: Save/RecurrentLoad validate both trunks
+	// against one shared OutputSize (see ExpandRecurrentParams' own doc
+	// comment), so a value trunk left at its old size fails to load back.
+	assert.Equal(t, newOutputSize, expanded.ValueTrunk.OutputSize())
 
 	assert.Equal(t, rp.PolicyLSTM.WxF.Data, expanded.PolicyLSTM.WxF.Data)
 	assert.Equal(t, rp.PolicyLSTM.WhF.Data, expanded.PolicyLSTM.WhF.Data)
 	assert.Equal(t, rp.ValueLSTM.WxI.Data, expanded.ValueLSTM.WxI.Data)
 	assert.Same(t, expanded.Trunk, expanded.PolicyTrunk, "Trunk must alias PolicyTrunk, matching NewRecurrentParams' own convention")
 	assert.Same(t, expanded.LSTM, expanded.PolicyLSTM, "LSTM must alias PolicyLSTM, matching NewRecurrentParams' own convention")
+}
+
+// TestExpandRecurrentParamsSurvivesASaveLoadRoundTrip pins the bug a
+// mismatched value-trunk output size produced live (cmd/expand-checkpoint's
+// own test suite, before ExpandRecurrentParams kept both trunks at the
+// same output size): RecurrentParams.Save/RecurrentLoad validate both
+// trunks' matrices against one shared InputSize/HiddenSize/OutputSize
+// triple derived from the POLICY trunk alone (RecurrentParams.OutputSize),
+// so a value trunk at any other output size fails to load back even
+// though nothing about the expand itself looked wrong in memory.
+func TestExpandRecurrentParamsSurvivesASaveLoadRoundTrip(t *testing.T) {
+	rng := rand.New(rand.NewPCG(21, 22))
+	rp := NewRecurrentParams(rng, 6, 5, 4, 2)
+
+	expanded, err := ExpandRecurrentParams(rp, 10, 7)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	require.NoError(t, expanded.Save(&buf, "env:actions=7:obs=10", checkpoint.Metadata{}))
+
+	reloaded, _, err := RecurrentLoad(bytes.NewReader(buf.Bytes()), "env:actions=7:obs=10")
+	require.NoError(t, err)
+	assert.Equal(t, 10, reloaded.PolicyTrunk.InputSize())
+	assert.Equal(t, 7, reloaded.PolicyTrunk.OutputSize())
 }
 
 // --- EnvironmentID expansion detection ---

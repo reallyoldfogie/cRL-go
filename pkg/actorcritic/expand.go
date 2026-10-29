@@ -89,17 +89,23 @@ func ExpandParams(p *Params, newInputSize, newOutputSize int) (*Params, error) {
 }
 
 // ExpandRecurrentParams is ExpandParams for a RecurrentParams: both the
-// policy and value trunks' input boundaries are expanded (they consume
-// the same observation), but the value trunk's OWN OutputSize (its
-// Wpi/Bpi - a full policy-shaped head NewParams always allocates even
-// for a trunk only ever read through its separate Wv/Bv scalar value
-// head, and so simply unused dead weight here) is left exactly as it
-// was: there's nothing semantically meaningful to expand it to, and
-// nothing reads it either way. Neither LSTM layer is touched at all: it
-// sits strictly between the trunks' hidden output and their heads (see
-// RecurrentParams' own doc comment's diagram), so its gate matrices are
-// HiddenSize x HiddenSize throughout, never sized against the
-// observation or action space in the first place.
+// policy and value trunks are expanded to the same newInputSize/
+// newOutputSize. The value trunk's own Wpi/Bpi (a full policy-shaped
+// head NewParams always allocates even for a trunk only ever read
+// through its separate Wv/Bv scalar value head, and so simply unused
+// dead weight either way) keeps the SAME output size as the policy
+// trunk's for exactly that reason, not because anything reads it:
+// RecurrentParams.Save/RecurrentLoad validate both trunks' matrices
+// against one shared InputSize/HiddenSize/OutputSize triple (derived
+// from the policy trunk alone, via RecurrentParams.OutputSize), so a
+// value trunk left at a different output size fails that check on the
+// very next save/load round trip - confirmed live by
+// cmd/expand-checkpoint's own test suite, not a guess. Neither LSTM
+// layer is touched at all: it sits strictly between the trunks' hidden
+// output and their heads (see RecurrentParams' own doc comment's
+// diagram), so its gate matrices are HiddenSize x HiddenSize
+// throughout, never sized against the observation or action space in
+// the first place.
 func ExpandRecurrentParams(rp *RecurrentParams, newInputSize, newOutputSize int) (*RecurrentParams, error) {
 	rp.mu.RLock()
 	defer rp.mu.RUnlock()
@@ -108,7 +114,7 @@ func ExpandRecurrentParams(rp *RecurrentParams, newInputSize, newOutputSize int)
 	if err != nil {
 		return nil, fmt.Errorf("actorcritic: ExpandRecurrentParams: policy trunk: %w", err)
 	}
-	value, err := ExpandParams(rp.valueTrunk(), newInputSize, rp.valueTrunk().OutputSize())
+	value, err := ExpandParams(rp.valueTrunk(), newInputSize, newOutputSize)
 	if err != nil {
 		return nil, fmt.Errorf("actorcritic: ExpandRecurrentParams: value trunk: %w", err)
 	}
