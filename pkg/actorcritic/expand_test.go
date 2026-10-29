@@ -151,6 +151,15 @@ func TestParseActionObsID(t *testing.T) {
 	assert.False(t, ok, "an ID with no actions=/obs= fragment must report ok=false")
 }
 
+func TestWithActionObsID(t *testing.T) {
+	got, ok := WithActionObsID("mc-agent-rlenv:actions=5:obs=25:norm=1", 19, 76)
+	require.True(t, ok)
+	assert.Equal(t, "mc-agent-rlenv:actions=19:obs=76:norm=1", got)
+
+	_, ok = WithActionObsID("snake:36", 19, 76)
+	assert.False(t, ok, "an ID with no actions=/obs= fragment must report ok=false")
+}
+
 func TestExpandTarget(t *testing.T) {
 	newActions, newObs, ok := ExpandTarget(
 		"mc-agent-rlenv:actions=5:obs=25:norm=1",

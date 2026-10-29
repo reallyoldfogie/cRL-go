@@ -169,6 +169,21 @@ func parseActionObsID(id string) (actions, obs int, template string, ok bool) {
 	return actions, obs, template, true
 }
 
+// WithActionObsID returns id with its actions=/obs= fragment's numbers
+// replaced by newActions/newObs, everything else unchanged - the
+// constructor side of parseActionObsID's own template, for a caller
+// that knows the new counts directly rather than another EnvironmentID
+// to diff against (e.g. cmd/expand-checkpoint, which takes -new-actions/
+// -new-obs on its own command line rather than a second, already-built
+// ID string). ok is false if id doesn't contain the fragment at all.
+func WithActionObsID(id string, newActions, newObs int) (string, bool) {
+	loc := environmentIDPattern.FindStringSubmatchIndex(id)
+	if loc == nil {
+		return "", false
+	}
+	return fmt.Sprintf("%sactions=%d:obs=%d%s", id[:loc[0]], newActions, newObs, id[loc[1]:]), true
+}
+
 // ExpandTarget reports whether a checkpoint saved under storedID can be
 // loaded into the shape expectedID describes by expanding rather than
 // retraining from scratch: both IDs must embed the actions=/obs=
