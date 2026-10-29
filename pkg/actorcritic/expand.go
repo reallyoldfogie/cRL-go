@@ -169,7 +169,7 @@ func parseActionObsID(id string) (actions, obs int, template string, ok bool) {
 	return actions, obs, template, true
 }
 
-// expandTarget reports whether a checkpoint saved under storedID can be
+// ExpandTarget reports whether a checkpoint saved under storedID can be
 // loaded into the shape expectedID describes by expanding rather than
 // retraining from scratch: both IDs must embed the actions=/obs=
 // fragment, agree on everything else in the string, and expectedID's
@@ -180,7 +180,7 @@ func parseActionObsID(id string) (actions, obs int, template string, ok bool) {
 // fragment - returns ok=false, so the caller falls back to Load's own
 // unmodified rejection rather than silently reshaping a checkpoint that
 // was never compatible with this one to begin with.
-func expandTarget(storedID, expectedID string) (newActions, newObs int, ok bool) {
+func ExpandTarget(storedID, expectedID string) (newActions, newObs int, ok bool) {
 	storedActions, storedObs, storedTemplate, ok1 := parseActionObsID(storedID)
 	wantActions, wantObs, wantTemplate, ok2 := parseActionObsID(expectedID)
 	if !ok1 || !ok2 || storedTemplate != wantTemplate {
@@ -198,7 +198,7 @@ func expandTarget(storedID, expectedID string) (newActions, newObs int, ok bool)
 // LoadExpanding is Load, but additionally tolerates a checkpoint saved
 // for a smaller actions=/obs= shape than expectedEnvironmentID's own
 // (everything else about the two IDs must match exactly - see
-// expandTarget) by expanding it via ExpandParams instead of rejecting
+// ExpandTarget) by expanding it via ExpandParams instead of rejecting
 // it outright. This is the ordinary situation right after mc-agent
 // grows its action space or observation vector and a given checkpoint
 // lineage hasn't been retrained since: the expanded Params this returns
@@ -224,7 +224,7 @@ func LoadExpanding(r io.Reader, expectedEnvironmentID string) (*Params, checkpoi
 		return Load(bytes.NewReader(raw), expectedEnvironmentID)
 	}
 
-	newActions, newObs, ok := expandTarget(data.EnvironmentID, expectedEnvironmentID)
+	newActions, newObs, ok := ExpandTarget(data.EnvironmentID, expectedEnvironmentID)
 	if !ok {
 		// Not expandable - let Load produce its own, already-correct
 		// rejection rather than duplicating that error message here.
@@ -273,7 +273,7 @@ func RecurrentLoadExpanding(r io.Reader, expectedEnvironmentID string) (*Recurre
 		return RecurrentLoad(bytes.NewReader(raw), expectedEnvironmentID)
 	}
 
-	newActions, newObs, ok := expandTarget(data.EnvironmentID, expectedEnvironmentID)
+	newActions, newObs, ok := ExpandTarget(data.EnvironmentID, expectedEnvironmentID)
 	if !ok {
 		return RecurrentLoad(bytes.NewReader(raw), expectedEnvironmentID)
 	}

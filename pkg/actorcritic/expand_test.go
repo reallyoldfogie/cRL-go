@@ -152,7 +152,7 @@ func TestParseActionObsID(t *testing.T) {
 }
 
 func TestExpandTarget(t *testing.T) {
-	newActions, newObs, ok := expandTarget(
+	newActions, newObs, ok := ExpandTarget(
 		"mc-agent-rlenv:actions=5:obs=25:norm=1",
 		"mc-agent-rlenv:actions=19:obs=76:norm=1",
 	)
@@ -160,25 +160,25 @@ func TestExpandTarget(t *testing.T) {
 	assert.Equal(t, 19, newActions)
 	assert.Equal(t, 76, newObs)
 
-	_, _, ok = expandTarget(
+	_, _, ok = ExpandTarget(
 		"mc-agent-rlenv:actions=5:obs=25:norm=1",
 		"mc-agent-rlenv:actions=5:obs=25:norm=1",
 	)
 	assert.False(t, ok, "an exact match is not an expansion target - Load/RecurrentLoad already handle it")
 
-	_, _, ok = expandTarget(
+	_, _, ok = ExpandTarget(
 		"mc-agent-rlenv:actions=19:obs=76:norm=1",
 		"mc-agent-rlenv:actions=5:obs=25:norm=1",
 	)
 	assert.False(t, ok, "shrinking must not be reported as expandable")
 
-	_, _, ok = expandTarget(
+	_, _, ok = ExpandTarget(
 		"mc-agent-rlenv:actions=5:obs=25",
 		"mc-agent-rlenv:actions=19:obs=76:norm=1",
 	)
 	assert.False(t, ok, "a mismatch outside the actions=/obs= fragment (here, the norm=1 suffix) must not be treated as expandable")
 
-	_, _, ok = expandTarget("snake:36", "mc-agent-rlenv:actions=19:obs=76")
+	_, _, ok = ExpandTarget("snake:36", "mc-agent-rlenv:actions=19:obs=76")
 	assert.False(t, ok, "an ID with no actions=/obs= fragment at all is never expandable")
 }
 
