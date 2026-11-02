@@ -56,6 +56,63 @@ type RecurrentTrainer struct {
 	// ever legitimately coupled.
 	policyAdam *actorcritic.Adam
 	valueAdam  *actorcritic.Adam
+
+	// rolloutProgress and resumeRollouts support resuming mid-epoch after
+	// a crash instead of re-collecting all settings.RolloutSize
+	// trajectories from scratch - see SetRolloutProgress/ResumeRollouts.
+	rolloutProgress RolloutCollected
+	resumeRollouts  []*RecurrentRollout
+}
+
+// RolloutCollected is called by collectRollouts (via RunEpoch)
+// immediately after one trajectory finishes collecting successfully -
+// see RecurrentTrainer.SetRolloutProgress.
+type RolloutCollected func(epoch, index int, rollout *RecurrentRollout)
+
+// SetRolloutProgress registers fn to be called once for each freshly
+// collected trajectory this epoch (never for one supplied via
+// ResumeRollouts, which by definition was already collected before). A
+// caller that persists each one as it arrives - RecurrentRollout and
+// everything it embeds is plain, JSON-serializable data - can survive a
+// crash mid-epoch having lost only whichever trajectory was in flight,
+// not every one collected so far; see ResumeRollouts for the other half
+// of this. fn runs synchronously on whichever goroutine collected that
+// trajectory (collectRecurrentRolloutsPool/Parallel run several at
+// once), so it must be safe for concurrent use and should not block for
+// long - a slow fn directly delays that epoch's PPO update.
+func (tr *RecurrentTrainer) SetRolloutProgress(fn RolloutCollected) {
+	tr.rolloutProgress = fn
+}
+
+// ResumeRollouts supplies the next call to RunEpoch's already-collected
+// trajectories (nil for any not yet collected) to resume from, instead
+// of collecting all settings.RolloutSize from scratch - see
+// SetRolloutProgress's own doc comment for the crash this exists to
+// survive. Consumed exactly once: collectRollouts clears this as soon as
+// it reads it (win or lose), so a later epoch never accidentally reuses
+// a stale epoch's partial rollouts - a caller resuming training mid-run
+// should call this at most once, for whichever epoch it's actually
+// resuming into. rollouts must have exactly settings.RolloutSize entries
+// (nil for not-yet-collected) or this panics: that is the exact shape
+// collectRollouts itself always produces and consumes, so a caller
+// reading back exactly what it persisted can't drift from it by
+// accident.
+func (tr *RecurrentTrainer) ResumeRollouts(rollouts []*RecurrentRollout) {
+	if len(rollouts) != tr.settings.RolloutSize {
+		panic(fmt.Sprintf("ppo: ResumeRollouts got %d entries, want exactly RolloutSize=%d", len(rollouts), tr.settings.RolloutSize))
+	}
+	tr.resumeRollouts = rollouts
+}
+
+// takeResume clears and returns tr.resumeRollouts - see its own doc
+// comment for why this is consumed exactly once. Returns nil (not a
+// RolloutSize-length slice of nils) when nothing was supplied, so a
+// caller can tell "nothing to resume" apart from "resume, but every slot
+// already collected" with a plain nil check.
+func (tr *RecurrentTrainer) takeResume() []*RecurrentRollout {
+	resumed := tr.resumeRollouts
+	tr.resumeRollouts = nil
+	return resumed
 }
 
 // NewRecurrent constructs a RecurrentTrainer from settings and
@@ -317,15 +374,21 @@ func (tr *RecurrentTrainer) collectRollouts(ctx context.Context, epoch int) ([]*
 // collectRecurrentRolloutsParallel collects settings.RolloutSize
 // trajectories in parallel, bounded to settings.Workers concurrent
 // goroutines, mirroring Trainer.collectRolloutsParallel exactly but
-// calling collectRecurrentTrajectory.
+// calling collectRecurrentTrajectory. Slots already supplied via
+// ResumeRollouts are left as-is rather than re-collected - see
+// SetRolloutProgress's own doc comment.
 func (tr *RecurrentTrainer) collectRecurrentRolloutsParallel(ctx context.Context, epoch int) ([]*RecurrentRollout, error) {
 	rollouts := make([]*RecurrentRollout, tr.settings.RolloutSize)
+	copy(rollouts, tr.takeResume())
 	errs := make([]error, tr.settings.RolloutSize)
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, tr.settings.Workers)
 
 	for i := range tr.settings.RolloutSize {
+		if rollouts[i] != nil {
+			continue
+		}
 		wg.Add(1)
 		semaphore <- struct{}{}
 
@@ -337,6 +400,9 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsParallel(ctx context.Context
 			rollout, err := collectRecurrentTrajectory(ctx, tr.params, tr.envFactory, tr.settings.EpisodeLen, rng)
 			rollouts[index] = rollout
 			errs[index] = err
+			if err == nil && tr.rolloutProgress != nil {
+				tr.rolloutProgress(epoch, index, rollout)
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -352,16 +418,25 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsParallel(ctx context.Context
 // collectRecurrentRolloutsSequential collects settings.RolloutSize
 // trajectories one at a time, on the calling goroutine, against
 // tr.persistentEnv — mirroring Trainer.collectRolloutsSequential
-// exactly, calling collectRecurrentTrajectoryFromEnv instead.
+// exactly, calling collectRecurrentTrajectoryFromEnv instead. Slots
+// already supplied via ResumeRollouts are left as-is rather than
+// re-collected - see SetRolloutProgress's own doc comment.
 func (tr *RecurrentTrainer) collectRecurrentRolloutsSequential(ctx context.Context, epoch int) ([]*RecurrentRollout, error) {
 	rollouts := make([]*RecurrentRollout, tr.settings.RolloutSize)
+	copy(rollouts, tr.takeResume())
 	for i := range tr.settings.RolloutSize {
+		if rollouts[i] != nil {
+			continue
+		}
 		rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, i)
 		rollout, err := collectRecurrentTrajectoryFromEnv(ctx, tr.params, tr.persistentEnv, tr.settings.EpisodeLen, rng)
 		if err != nil {
 			return nil, err
 		}
 		rollouts[i] = rollout
+		if tr.rolloutProgress != nil {
+			tr.rolloutProgress(epoch, i, rollout)
+		}
 	}
 	return rollouts, nil
 }
@@ -370,10 +445,16 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsSequential(ctx context.Conte
 // trajectories across tr.persistentEnvs, bounded to exactly
 // len(tr.persistentEnvs) concurrent goroutines — mirroring
 // Trainer.collectRolloutsPool exactly, including its own
-// episode-striping and early-return-on-error behavior.
+// episode-striping and early-return-on-error behavior. Slots already
+// supplied via ResumeRollouts are left as-is rather than re-collected -
+// see SetRolloutProgress's own doc comment. Each worker only ever reads
+// or writes its own disjoint stripe of indices (i := worker; i < size; i
+// += n), so checking/writing rollouts[i] from multiple goroutines here
+// needs no locking: no two workers ever touch the same index.
 func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, epoch int) ([]*RecurrentRollout, error) {
 	n := len(tr.persistentEnvs)
 	rollouts := make([]*RecurrentRollout, tr.settings.RolloutSize)
+	copy(rollouts, tr.takeResume())
 	errs := make([]error, tr.settings.RolloutSize)
 
 	var wg sync.WaitGroup
@@ -383,6 +464,9 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, ep
 			defer wg.Done()
 			env := tr.persistentEnvs[worker]
 			for i := worker; i < tr.settings.RolloutSize; i += n {
+				if rollouts[i] != nil {
+					continue
+				}
 				rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, i)
 				rollout, err := collectRecurrentTrajectoryFromEnv(ctx, tr.params, env, tr.settings.EpisodeLen, rng)
 				if err != nil {
@@ -390,6 +474,9 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, ep
 					return
 				}
 				rollouts[i] = rollout
+				if tr.rolloutProgress != nil {
+					tr.rolloutProgress(epoch, i, rollout)
+				}
 			}
 		}(worker)
 	}
