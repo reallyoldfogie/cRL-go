@@ -29,6 +29,83 @@ This module is tagged with standard Go semantic-versioning git tags (`vMAJOR.MIN
 
 `pkg/rl`'s interfaces (`Environment`, `Observation`, `Action`) are the surface external consumers depend on most directly, so a tag whose message doesn't call out a change there risks silently breaking a downstream build. Release notes live in each annotated tag's own message (`git tag -a vX.Y.Z -m "..."`) rather than a separate changelog file.
 
+## ONNX support (`pkg/onnx`) — regenerating the protobuf types
+
+`pkg/onnx` holds Go types for the [ONNX](https://onnx.ai/) model format — `ModelProto`, `GraphProto`, `NodeProto`, `TensorProto`, and the rest of the IR — generated directly from ONNX's own official protobuf schema rather than hand-written or pulled in via a third-party Go ONNX library. This is the first piece of `docs/plans/23-ONNX-support.md` (export `pkg/actorcritic` models to `.onnx`, run them back through a small pure-Go interpreter, with no CGO and no ONNX Runtime dependency anywhere).
+
+**You do not need `protoc` or `protoc-gen-go` to build or use cRL-go day to day.** The generated output (`pkg/onnx/onnx.pb.go`) is committed, same as any other source file. These tools are only needed if you're regenerating that file — e.g. bumping the vendored schema to a newer ONNX release.
+
+### What's vendored, and from where
+
+`pkg/onnx/proto/onnx.proto` is a byte-for-byte copy of [`onnx/onnx`](https://github.com/onnx/onnx)'s `onnx/onnx.proto` — the file defining the ONNX IR itself (model/graph/node/tensor messages), as opposed to `onnx-operators.proto` (the operator *schema registry*, used by shape-inference tooling, which this project has no use for: the exporter only ever emits a handful of hand-coded, already-known-correct node types).
+
+It's pinned to a specific release tag rather than tracking `main`, so regenerating without an explicit decision to upgrade can't silently change what this package produces:
+
+- **Pinned tag:** `v1.23.2`
+- **Source URL:** `https://raw.githubusercontent.com/onnx/onnx/v1.23.2/onnx/onnx.proto`
+- **IR version this schema declares as current:** 14 (`onnx.Version_IR_VERSION` in the generated code)
+- **Opset this project targets:** 21 (ai.onnx default domain) — well under this schema's own ceiling (28, per `onnx.defs.onnx_opset_version()` in the matching Python `onnx` package), chosen because every op `pkg/onnx` consumers need (`Gemm`, `Relu`, `Softmax`, `Sigmoid`, `Tanh`, `Add`, `Mul`) has had stable semantics since long before opset 21, and staying well under the ceiling maximizes compatibility with whatever reads the resulting files (Netron, `onnxruntime`, anything else).
+
+To bump the vendored schema to a newer ONNX release, re-download `onnx.proto` from that release's tag (same URL pattern, new tag) over `pkg/onnx/proto/onnx.proto`, then regenerate (below) and update the pinned values here and in any code comments that cite them (e.g. `pkg/onnx/smoke_test.go`'s `opsetVersion`/`irVersion` constants).
+
+### Installing `protoc`
+
+`protoc` is the Protocol Buffers compiler — a C++ binary, not something `go install` can fetch, since it isn't Go code. Two ways to get it:
+
+**Package manager** (if you have one with a recent-enough version and sudo access):
+
+```sh
+sudo apt install protobuf-compiler   # Debian/Ubuntu
+brew install protobuf                # macOS
+```
+
+**Manual download, no sudo needed** (what this project's own setup used, and the reliable option in a sandboxed/no-sudo environment): download the prebuilt release archive for your platform directly from the [protobuf releases page](https://github.com/protocolbuffers/protobuf/releases), unzip it anywhere, and put its `bin/` on `PATH` for the commands below. For example, on Linux x86_64:
+
+```sh
+curl -L -o protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip
+unzip -q protoc.zip -d protoc
+export PATH="$PWD/protoc/bin:$PATH"
+protoc --version   # libprotoc 36.2
+```
+
+(Swap `linux-x86_64` for `osx-x86_64`/`osx-aarch_64`/`win64` etc. as needed; check the releases page for the current version rather than assuming `v36.2` is still latest.) This only needs to live somewhere on `PATH` for the regeneration commands below — it's not a project dependency, so there's nothing to vendor or commit.
+
+### Installing `protoc-gen-go`
+
+This is the actual Go code generator `protoc` delegates to for Go output — and unlike `protoc` itself, it *is* a Go tool:
+
+```sh
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+```
+
+This installs to `$(go env GOPATH)/bin` (typically `~/go/bin`) — make sure that's on `PATH`, since `protoc` finds `protoc-gen-go` by searching `PATH` for a binary named exactly `protoc-gen-go`:
+
+```sh
+export PATH="$(go env GOPATH)/bin:$PATH"
+protoc-gen-go --version
+```
+
+### Regenerating `pkg/onnx/onnx.pb.go`
+
+With both tools on `PATH`, from the module root:
+
+```sh
+protoc --proto_path=pkg/onnx/proto \
+  --go_out=paths=source_relative:pkg/onnx \
+  --go_opt=Monnx.proto=github.com/reallyoldfogie/cRL-go/pkg/onnx \
+  pkg/onnx/proto/onnx.proto
+```
+
+- `--proto_path` points at the vendored schema's directory.
+- `--go_out=paths=source_relative:pkg/onnx` writes the output next to where it's imported from, mirroring the proto's path relative to `--proto_path` (just `onnx.proto` → `pkg/onnx/onnx.pb.go`).
+- `--go_opt=Monnx.proto=...` sets the generated package's import path explicitly, since `onnx.proto` (being a third-party, non-Go-aware schema) has no `go_package` option of its own to infer it from.
+
+Then rebuild/retest as usual (`go build ./pkg/onnx/...`, `go test ./pkg/onnx/...`) to confirm the regenerated code still compiles and the round-trip test in `pkg/onnx/smoke_test.go` still passes. `google.golang.org/protobuf` (the generated code's runtime dependency, pure Go, no CGO) is a normal `go.mod` dependency — `go get google.golang.org/protobuf@latest` if it's ever missing.
+
+### A note on this repo's Go workspace
+
+If you're working inside the top-level `go.work` that ties this repo together with its sibling Minecraft-agent repos, a worktree checkout of cRL-go (e.g. under `.worktrees/`) isn't listed in that workspace's `use` directive, and Go will complain about inconsistent vendoring if you try to build from inside it with workspace mode active. Run `go` commands with `GOWORK=off` from inside such a worktree to build it as its own standalone module instead.
+
 ## Quickstart
 
 Build and run from the module root:
