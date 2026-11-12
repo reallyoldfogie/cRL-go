@@ -19,20 +19,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// opsetVersion is the ai.onnx (default-domain) opset this package targets.
-// 21 is used rather than this vendored schema's own ceiling (28, as of the
-// pinned onnx v1.23.2 release — see README.md) because every op this
-// project needs (Gemm, Relu, Softmax, Sigmoid, Tanh, Add, Mul) has had
-// stable semantics since long before opset 21, and staying well under the
-// ceiling maximizes compatibility with whatever reads these files (Netron,
-// onnxruntime, or anything else).
-const opsetVersion = 21
-
-// irVersion is onnx.proto's Version_IR_VERSION constant for the pinned
-// v1.23.2 schema (see README.md) — the IR version every model this package
-// produces declares itself as targeting.
-const irVersion = int64(Version_IR_VERSION)
-
 // floatTensor builds a TensorProto initializer: a named, float32 tensor
 // with the given shape and flattened row-major data.
 func floatTensor(name string, dims []int64, data []float32) *TensorProto {
@@ -114,11 +100,11 @@ func buildTrivialGemmReluModel() *ModelProto {
 	}
 
 	return &ModelProto{
-		IrVersion:       proto.Int64(irVersion),
+		IrVersion:       proto.Int64(IRVersion),
 		ProducerName:    proto.String("cRL-go/pkg/onnx (phase 1 smoke test)"),
 		ProducerVersion: proto.String("0.0.0-phase1"),
 		OpsetImport: []*OperatorSetIdProto{
-			{Domain: proto.String(""), Version: proto.Int64(opsetVersion)},
+			{Domain: proto.String(""), Version: proto.Int64(OpsetVersion)},
 		},
 		Graph: graph,
 		DocString: proto.String(
@@ -157,8 +143,8 @@ func TestTrivialGemmReluModelRoundTrip(t *testing.T) {
 	if got.GetIrVersion() != want.GetIrVersion() {
 		t.Errorf("IrVersion = %d, want %d", got.GetIrVersion(), want.GetIrVersion())
 	}
-	if len(got.GetOpsetImport()) != 1 || got.GetOpsetImport()[0].GetVersion() != opsetVersion {
-		t.Errorf("OpsetImport = %v, want [{domain:\"\" version:%d}]", got.GetOpsetImport(), opsetVersion)
+	if len(got.GetOpsetImport()) != 1 || got.GetOpsetImport()[0].GetVersion() != OpsetVersion {
+		t.Errorf("OpsetImport = %v, want [{domain:\"\" version:%d}]", got.GetOpsetImport(), OpsetVersion)
 	}
 
 	gotGraph, wantGraph := got.GetGraph(), want.GetGraph()
