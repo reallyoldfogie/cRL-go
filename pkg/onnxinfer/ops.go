@@ -151,6 +151,33 @@ func at2D(t *Tensor, transpose bool, row, col int) float32 {
 	return t.Data[row*physCols+col]
 }
 
+// evalElementwise applies op to a and b, which must have identical
+// shapes — no broadcasting, since every Add/Mul this project's exporter
+// emits (the LSTM gate decomposition) only ever combines two tensors of
+// the same [1, hiddenSize] shape.
+func evalElementwise(a, b *Tensor, op func(x, y float32) float32) (*Tensor, error) {
+	if len(a.Data) != len(b.Data) {
+		return nil, fmt.Errorf("shape mismatch: %v vs %v (no broadcasting supported)", a.Dims, b.Dims)
+	}
+	out := make([]float32, len(a.Data))
+	for i := range a.Data {
+		out[i] = op(a.Data[i], b.Data[i])
+	}
+	return &Tensor{Dims: append([]int64(nil), a.Dims...), Data: out}, nil
+}
+
+func evalUnary(a *Tensor, op func(float32) float32) *Tensor {
+	out := make([]float32, len(a.Data))
+	for i, v := range a.Data {
+		out[i] = op(v)
+	}
+	return &Tensor{Dims: append([]int64(nil), a.Dims...), Data: out}
+}
+
+func sigmoidf(v float32) float32 { return 1 / (1 + expf(-v)) }
+
+func tanhf(v float32) float32 { return float32(math.Tanh(float64(v))) }
+
 func evalRelu(a *Tensor) *Tensor {
 	out := make([]float32, len(a.Data))
 	for i, v := range a.Data {

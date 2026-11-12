@@ -135,9 +135,17 @@ func evalNode(node *onnxpb.NodeProto, values map[string]*Tensor) ([]*Tensor, err
 		if err != nil {
 			return nil, err
 		}
-		c, err := in(2)
-		if err != nil {
-			return nil, err
+		// C (the bias operand) is optional per the ONNX spec — this
+		// project's LSTM decomposition (pkg/onnxexport's recurrent
+		// export) relies on that to compute Wx*a and Wh*hPrev as two
+		// separate bias-free Gemms summed by a following Add, with the
+		// gate's actual bias folded into only one of them.
+		var c *Tensor
+		if len(node.GetInput()) > 2 {
+			c, err = in(2)
+			if err != nil {
+				return nil, err
+			}
 		}
 		out, err := evalGemm(node, a, b, c)
 		if err != nil {
@@ -162,6 +170,50 @@ func evalNode(node *onnxpb.NodeProto, values map[string]*Tensor) ([]*Tensor, err
 			return nil, err
 		}
 		return []*Tensor{out}, nil
+
+	case "Add":
+		a, err := in(0)
+		if err != nil {
+			return nil, err
+		}
+		b, err := in(1)
+		if err != nil {
+			return nil, err
+		}
+		out, err := evalElementwise(a, b, func(x, y float32) float32 { return x + y })
+		if err != nil {
+			return nil, fmt.Errorf("Add: %w", err)
+		}
+		return []*Tensor{out}, nil
+
+	case "Mul":
+		a, err := in(0)
+		if err != nil {
+			return nil, err
+		}
+		b, err := in(1)
+		if err != nil {
+			return nil, err
+		}
+		out, err := evalElementwise(a, b, func(x, y float32) float32 { return x * y })
+		if err != nil {
+			return nil, fmt.Errorf("Mul: %w", err)
+		}
+		return []*Tensor{out}, nil
+
+	case "Sigmoid":
+		a, err := in(0)
+		if err != nil {
+			return nil, err
+		}
+		return []*Tensor{evalUnary(a, sigmoidf)}, nil
+
+	case "Tanh":
+		a, err := in(0)
+		if err != nil {
+			return nil, err
+		}
+		return []*Tensor{evalUnary(a, tanhf)}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported op %q — onnxinfer only executes the fixed op set pkg/onnxexport emits, not arbitrary ONNX models (see package doc comment)", node.GetOpType())

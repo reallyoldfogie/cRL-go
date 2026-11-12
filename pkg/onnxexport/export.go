@@ -28,13 +28,41 @@ const (
 )
 
 // hiddenLayerOutputName returns the name of hidden layer i's post-ReLU
-// output — "observation" for i == -1 (the trunk's own input), so the
-// first layer's Gemm can use the same naming logic as every later one.
-func hiddenLayerOutputName(i int) string {
+// output under the given node-name prefix ("" for the feedforward case's
+// single trunk; "policy_"/"value_" for the recurrent case's two — see
+// recurrent.go) — prefix+"observation" for i == -1 (the trunk's own
+// input, which for the recurrent case is still the shared raw
+// observation, not yet prefixed — see appendTrunkHidden), so the first
+// layer's Gemm can use the same naming logic as every later one.
+func hiddenLayerOutputName(prefix string, i int) string {
 	if i < 0 {
 		return ObservationInputName
 	}
-	return fmt.Sprintf("hidden%d.out", i)
+	return fmt.Sprintf("%shidden%d.out", prefix, i)
+}
+
+// appendTrunkHidden appends the Gemm+Relu nodes and weight/bias
+// initializers for hidden's layers (the shared-trunk loop both
+// ExportFeedforward and ExportRecurrent need — see recurrent.go),
+// reading from inputName and returning the final layer's output name
+// alongside the extended nodes/initializers slices.
+func appendTrunkHidden(nodes []*onnxpb.NodeProto, initializers []*onnxpb.TensorProto, prefix, inputName string, hidden []actorcritic.Layer) (outNodes []*onnxpb.NodeProto, outInitializers []*onnxpb.TensorProto, lastOutputName string) {
+	prev := inputName
+	for i, layer := range hidden {
+		wName, bName := fmt.Sprintf("%shidden%d.w", prefix, i), fmt.Sprintf("%shidden%d.b", prefix, i)
+		preName, outName := fmt.Sprintf("%shidden%d.pre", prefix, i), hiddenLayerOutputName(prefix, i)
+
+		initializers = append(initializers,
+			matrixTensor(wName, layer.W),
+			biasTensor(bName, layer.B),
+		)
+		nodes = append(nodes,
+			gemmNode(fmt.Sprintf("%shidden%d.gemm", prefix, i), prev, wName, bName, preName),
+			reluNode(fmt.Sprintf("%shidden%d.relu", prefix, i), preName, outName),
+		)
+		prev = outName
+	}
+	return nodes, initializers, prev
 }
 
 // ExportFeedforward builds an ONNX ModelProto computing exactly what
@@ -64,21 +92,7 @@ func ExportFeedforward(params *actorcritic.Params, envID string) (*onnxpb.ModelP
 	var nodes []*onnxpb.NodeProto
 	var initializers []*onnxpb.TensorProto
 
-	prev := hiddenLayerOutputName(-1)
-	for i, layer := range params.Hidden {
-		wName, bName := fmt.Sprintf("hidden%d.w", i), fmt.Sprintf("hidden%d.b", i)
-		preName, outName := fmt.Sprintf("hidden%d.pre", i), hiddenLayerOutputName(i)
-
-		initializers = append(initializers,
-			matrixTensor(wName, layer.W),
-			biasTensor(bName, layer.B),
-		)
-		nodes = append(nodes,
-			gemmNode(fmt.Sprintf("hidden%d.gemm", i), prev, wName, bName, preName),
-			reluNode(fmt.Sprintf("hidden%d.relu", i), preName, outName),
-		)
-		prev = outName
-	}
+	nodes, initializers, prev := appendTrunkHidden(nodes, initializers, "", ObservationInputName, params.Hidden)
 
 	initializers = append(initializers,
 		matrixTensor("policy.w", params.Wpi),

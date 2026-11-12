@@ -72,6 +72,59 @@ func gemmNode(name, input, weight, bias, output string) *onnxpb.NodeProto {
 	}
 }
 
+// gemmNodeNoBias builds a Gemm node computing input @ weight^T (transB=1,
+// no C operand — ONNX's Gemm spec makes C optional). Used by the LSTM
+// gate decomposition (recurrent.go) to compute Wx*a and Wh*hPrev as two
+// separate bias-free terms, summed by a following Add, with the gate's
+// actual bias folded into only one of the two Gemms.
+func gemmNodeNoBias(name, input, weight, output string) *onnxpb.NodeProto {
+	return &onnxpb.NodeProto{
+		Name:   proto.String(name),
+		OpType: proto.String("Gemm"),
+		Input:  []string{input, weight},
+		Output: []string{output},
+		Attribute: []*onnxpb.AttributeProto{
+			intAttr("transB", 1),
+		},
+	}
+}
+
+func addNode(name, a, b, output string) *onnxpb.NodeProto {
+	return &onnxpb.NodeProto{
+		Name:   proto.String(name),
+		OpType: proto.String("Add"),
+		Input:  []string{a, b},
+		Output: []string{output},
+	}
+}
+
+func mulNode(name, a, b, output string) *onnxpb.NodeProto {
+	return &onnxpb.NodeProto{
+		Name:   proto.String(name),
+		OpType: proto.String("Mul"),
+		Input:  []string{a, b},
+		Output: []string{output},
+	}
+}
+
+func sigmoidNode(name, input, output string) *onnxpb.NodeProto {
+	return &onnxpb.NodeProto{
+		Name:   proto.String(name),
+		OpType: proto.String("Sigmoid"),
+		Input:  []string{input},
+		Output: []string{output},
+	}
+}
+
+func tanhNode(name, input, output string) *onnxpb.NodeProto {
+	return &onnxpb.NodeProto{
+		Name:   proto.String(name),
+		OpType: proto.String("Tanh"),
+		Input:  []string{input},
+		Output: []string{output},
+	}
+}
+
 func reluNode(name, input, output string) *onnxpb.NodeProto {
 	return &onnxpb.NodeProto{
 		Name:   proto.String(name),
