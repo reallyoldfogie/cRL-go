@@ -131,12 +131,12 @@ func TestRecurrentChunkReplayMatchesCollectionOutputs(t *testing.T) {
 	advantages := make([]float32, len(rollout.Episode.Transitions))
 	returns := make([]float32, len(rollout.Episode.Transitions))
 	chunks := chunkRollout(rollout, advantages, returns, 3, params.InputSize())
-	network, err := NewRecurrentTrainingNetwork(params, 3, LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5})
+	network, err := NewRecurrentTrainingNetwork(params, 3, 1, LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5})
 	require.NoError(t, err)
 
 	stepIndex := 0
 	for _, chunk := range chunks {
-		network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
+		network.SetSplitChunkColumn(0, chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
 		network.Graph.Forward()
 		for stepOffset, step := range chunk.Steps {
 			if !step.Real {
@@ -206,6 +206,91 @@ func TestTrainOnChunkMinibatchParallelMatchesSingleThreaded(t *testing.T) {
 	}
 }
 
+// TestBatchedChunkTrainingMatchesSequentialOneChunkAtATime is the
+// cross-check batched recurrent training actually needs: it directly
+// compares (a) the original approach — a batchSize=1
+// RecurrentTrainingNetwork, ZeroGrad once, then one Forward/Backward
+// call per chunk in turn, accumulating gradient across all of them —
+// against (b) the new approach — a batchSize=len(chunks) network, every
+// chunk occupying its own batch column, ZeroGrad once, exactly one
+// Forward/Backward call for the whole batch. Both must produce the
+// same total loss (summed across every chunk/column) and the same
+// final gradient for every shared parameter.
+//
+// This is the test that actually matters for this change: a subtle
+// batching bug (wrong axis in AddBias or Softmax, the value loss's
+// MulBroadcastCols leaking one column into another, a dropped or
+// misrouted batch column) would silently produce wrong gradients that
+// still "run" without panicking or producing NaN — it would only ever
+// show up later as training that mysteriously doesn't learn as well as
+// it used to, which is exactly the class of bug a quick smoke test
+// can't catch. Comparing against the known-correct sequential behavior
+// catches it here instead.
+func TestBatchedChunkTrainingMatchesSequentialOneChunkAtATime(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+
+	rng := rand.New(rand.NewPCG(53, 59))
+	params := actorcritic.NewRecurrentParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions, 2)
+
+	var chunks []recurrentChunk
+	for i := range 5 {
+		rollout, err := collectRecurrentTrajectory(context.Background(), params, snakeEnvFactory(settings.GridSize), 10, rand.New(rand.NewPCG(uint64(61+i), uint64(67+i))))
+		require.NoError(t, err)
+		advantages, returns := ComputeGAE(rollout.Rollout, settings.Gamma, settings.GAELambda)
+		chunks = append(chunks, chunkRollout(rollout, advantages, returns, settings.RecurrentChunkLen, params.InputSize())...)
+	}
+	require.Greater(t, len(chunks), 1, "need more than one chunk for this comparison to mean anything")
+
+	lossCfg := LossConfig{ClipEpsilon: settings.ClipEpsilon, EntropyCoef: settings.EntropyCoef, ValueCoef: settings.ValueCoef}
+
+	sequentialNet, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, 1, lossCfg)
+	require.NoError(t, err)
+	sequentialNet.Actor.ZeroGrad()
+	var sequentialLossSum float64
+	for _, chunk := range chunks {
+		sequentialNet.SetSplitChunkColumn(0, chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
+		sequentialNet.Graph.Forward()
+		sequentialLossSum += chunkSumFloat32(sequentialNet.Loss.Val.Data)
+		sequentialNet.Graph.Backward()
+	}
+
+	batchedNet, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, len(chunks), lossCfg)
+	require.NoError(t, err)
+	batchedNet.Actor.ZeroGrad()
+	for col, chunk := range chunks {
+		batchedNet.SetSplitChunkColumn(col, chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
+	}
+	batchedNet.Graph.Forward()
+	batchedLossSum := chunkSumFloat32(batchedNet.Loss.Val.Data)
+	batchedNet.Graph.Backward()
+
+	assert.InDelta(t, sequentialLossSum, batchedLossSum, 1e-2, "batched total loss must match the sum of each chunk's own sequential loss")
+
+	sequentialParams := sequentialNet.Actor.Parameters()
+	batchedParams := batchedNet.Actor.Parameters()
+	require.Equal(t, len(sequentialParams), len(batchedParams))
+	for i := range sequentialParams {
+		require.Equal(t, len(sequentialParams[i].Grad.Data), len(batchedParams[i].Grad.Data), "parameter %d shape mismatch", i)
+		for j := range sequentialParams[i].Grad.Data {
+			assert.InDelta(t, sequentialParams[i].Grad.Data[j], batchedParams[i].Grad.Data[j], 1e-2,
+				"parameter %d, element %d: batched gradient diverged from the sequential, one-chunk-at-a-time reference", i, j)
+		}
+	}
+}
+
+// chunkSumFloat32 sums data as a float64, mirroring sumMatrix
+// (gradcheck_test.go) but for a plain []float32 rather than a
+// *mat.Matrix, and distinctly named from pkg/actorcritic's own
+// identically-purposed chunkSumMatrix since Go test files in different
+// packages can't share helpers.
+func chunkSumFloat32(data []float32) float64 {
+	var sum float64
+	for _, v := range data {
+		sum += float64(v)
+	}
+	return sum
+}
+
 func TestMaskedRecurrentReplayRatioMatchesCollection(t *testing.T) {
 	rng := rand.New(rand.NewPCG(71, 73))
 	params := actorcritic.NewRecurrentParams(rng, 4, 6, 3, 2)
@@ -221,9 +306,9 @@ func TestMaskedRecurrentReplayRatioMatchesCollection(t *testing.T) {
 	const action rl.Action = 0
 	oldLogProb := maskedActionLogProb(collectionNet.PolicyOutput.Val, mask, action)
 
-	trainingNet, err := NewRecurrentTrainingNetwork(params, 1, LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5})
+	trainingNet, err := NewRecurrentTrainingNetwork(params, 1, 1, LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5})
 	require.NoError(t, err)
-	trainingNet.SetChunk([]recurrentTrainingStep{{
+	trainingNet.SetChunkColumn(0, []recurrentTrainingStep{{
 		Observation: observation,
 		Action:      action,
 		Mask:        mask,

@@ -177,7 +177,7 @@ func TestGradientCheckRecurrentChunkTrainingNetworkAccumulatesAcrossTimesteps(t 
 	scaleRecurrentParams(params, 0.2)
 
 	const chunkLen = 3
-	net, err := NewRecurrentChunkTrainingNetwork(params, chunkLen)
+	net, err := NewRecurrentChunkTrainingNetwork(params, chunkLen, 1)
 	require.NoError(t, err)
 
 	for step := 0; step < chunkLen; step++ {
@@ -215,15 +215,113 @@ func TestRecurrentChunkTrainingNetworkRejectsNonPositiveChunkLen(t *testing.T) {
 	rng := rand.New(rand.NewPCG(13, 14))
 	params := NewRecurrentParams(rng, 4, 5, 3, 1)
 
-	_, err := NewRecurrentChunkTrainingNetwork(params, 0)
+	_, err := NewRecurrentChunkTrainingNetwork(params, 0, 1)
 	assert.Error(t, err)
+}
+
+func TestRecurrentChunkTrainingNetworkRejectsNonPositiveBatchSize(t *testing.T) {
+	rng := rand.New(rand.NewPCG(13, 15))
+	params := NewRecurrentParams(rng, 4, 5, 3, 1)
+
+	_, err := NewRecurrentChunkTrainingNetwork(params, 3, 0)
+	assert.Error(t, err)
+}
+
+// TestGradientCheckRecurrentChunkTrainingNetworkBatchColumnsAreIndependent
+// is TestGradientCheckRecurrentChunkTrainingNetworkAccumulatesAcrossTimesteps
+// at batchSize=2 instead of the implicit 1: two chunks, each with its
+// own input and starting hidden/cell state, trained together in one
+// Forward/Backward call. If AddBias or buildRecurrentForward's other
+// per-column handling broadcast along the wrong axis, this would still
+// pass a batchSize=1 check (there'd be only one column to get right)
+// but fail here, where getting the column axis wrong lets one chunk's
+// gradient leak into the other's.
+func TestGradientCheckRecurrentChunkTrainingNetworkBatchColumnsAreIndependent(t *testing.T) {
+	rng := rand.New(rand.NewPCG(23, 24))
+	params := NewRecurrentParams(rng, 4, 5, 3, 2)
+	scaleRecurrentParams(params, 0.2) // see the sibling test's own doc comment for why
+
+	const chunkLen, batchSize = 3, 2
+	net, err := NewRecurrentChunkTrainingNetwork(params, chunkLen, batchSize)
+	require.NoError(t, err)
+
+	for step := 0; step < chunkLen; step++ {
+		net.Input[step].Val.FillRand(rng, -0.3, 0.3)
+	}
+
+	selectFirstAction := &autograd.Var{Val: &mat.Matrix{Rows: 1, Cols: 3, Data: []float32{1, 0, 0}}}
+
+	var combined *autograd.Var
+	for step := 0; step < chunkLen; step++ {
+		selectedProb, err := autograd.MatMul(selectFirstAction, net.PolicyOutput[step])
+		require.NoError(t, err)
+
+		stepSum, err := autograd.Add(selectedProb, net.ValueOutput[step])
+		require.NoError(t, err)
+
+		if combined == nil {
+			combined = stepSum
+		} else {
+			combined, err = autograd.Add(combined, stepSum)
+			require.NoError(t, err)
+		}
+	}
+
+	graph := autograd.BuildGraph(combined)
+	graph.Forward()
+	graph.Backward()
+
+	for _, p := range net.Parameters() {
+		chunkAssertMatricesClose(t, p.Grad, chunkNumericalGradient(p, combined, graph.Forward), chunkGradCheckTolerance)
+	}
+}
+
+// TestRecurrentChunkTrainingNetworkBatchColumnsDontCollapseTogether is a
+// cheap complement to the gradient-check above: a gradient check alone
+// can't tell a correctly-independent batch apart from a bug that
+// silently computes the same thing for every column (both would still
+// pass, since Backward's internal consistency doesn't depend on the
+// forward pass actually using each column's own distinct input) — this
+// confirms the two batch columns, seeded with different inputs and
+// starting states, actually produce different outputs.
+func TestRecurrentChunkTrainingNetworkBatchColumnsDontCollapseTogether(t *testing.T) {
+	rng := rand.New(rand.NewPCG(25, 26))
+	params := NewRecurrentParams(rng, 4, 5, 3, 1)
+
+	const chunkLen, batchSize = 2, 2
+	net, err := NewRecurrentChunkTrainingNetwork(params, chunkLen, batchSize)
+	require.NoError(t, err)
+
+	inputs := [batchSize][]float32{
+		{0.1, -0.2, 0.3, 0.4},
+		{-0.9, 0.8, -0.7, 0.6},
+	}
+	states := [batchSize][]float32{
+		{0, 0, 0, 0, 0},
+		{0.5, -0.5, 0.5, -0.5, 0.5},
+	}
+	for col := range batchSize {
+		for t := range chunkLen {
+			net.Input[t].Val.SetColumn(col, inputs[col])
+		}
+		net.SetSplitChunkState(col, states[col], states[col], states[col], states[col])
+	}
+
+	graph := autograd.BuildGraphMulti(net.PolicyOutput[chunkLen-1], net.ValueOutput[chunkLen-1])
+	graph.Forward()
+
+	col0 := make([]float32, 3)
+	col1 := make([]float32, 3)
+	net.PolicyOutput[chunkLen-1].Val.Column(0, col0)
+	net.PolicyOutput[chunkLen-1].Val.Column(1, col1)
+	assert.NotEqual(t, col0, col1, "two batch columns seeded with different inputs/states must not produce identical outputs")
 }
 
 func TestRecurrentChunkTrainingNetworkApplyGradientStepUpdatesSharedWeightsOnce(t *testing.T) {
 	rng := rand.New(rand.NewPCG(15, 16))
 	params := NewRecurrentParams(rng, 4, 5, 3, 2)
 
-	net, err := NewRecurrentChunkTrainingNetwork(params, 3)
+	net, err := NewRecurrentChunkTrainingNetwork(params, 3, 1)
 	require.NoError(t, err)
 
 	before := append([]float32(nil), params.LSTM.WxF.Data...)
@@ -237,7 +335,7 @@ func TestRecurrentChunkTrainingNetworkApplyGradientStepUpdatesSharedWeightsOnce(
 
 func TestSplitRecurrentObjectivesDoNotCrossUpdateBranches(t *testing.T) {
 	params := NewRecurrentParams(rand.New(rand.NewPCG(41, 42)), 4, 5, 3, 1)
-	net, err := NewRecurrentChunkTrainingNetwork(params, 1)
+	net, err := NewRecurrentChunkTrainingNetwork(params, 1, 1)
 	require.NoError(t, err)
 	net.Input[0].Val.Fill(0.25)
 	for _, trunk := range []*Params{params.policyTrunk(), params.valueTrunk()} {

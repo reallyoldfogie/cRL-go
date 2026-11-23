@@ -10,24 +10,31 @@ import (
 // combined loss Var, following docs/plans/03-gae-and-ppo-objective.md.
 //
 // Every intermediate Var here keeps the same shape as the policy head's
-// output ((outputSize, 1)), or is broadcast into it, so the whole loss
-// stays one vector whose entries sum — via Graph.Backward's all-ones
-// gradient seeding, see pkg/autograd/graph.go's doc comment and
-// pkg/autograd/ops.go's reinforceLossOp, which relies on the same
-// property — to the true scalar objective:
+// output ((outputSize, BatchSize) — (outputSize, 1) for every
+// non-recurrent caller, which never batches), or is broadcast into it,
+// so the whole loss stays one (outputSize, BatchSize) matrix whose
+// entries sum — via Graph.Backward's all-ones gradient seeding, see
+// pkg/autograd/graph.go's doc comment and pkg/autograd/ops.go's
+// reinforceLossOp, which relies on the same property — to the true
+// scalar objective, summed over every batch column too (exactly what a
+// caller training several samples/chunks together in one combined pass
+// wants: the gradient of their total loss, equal to what separately
+// accumulating each sample's own backward pass would have summed to):
 //
 //   - The policy surrogate terms are masked to the sampled action's
-//     index by actionMask (one-hot: 1 at that index, 0 elsewhere), so
-//     only that entry is nonzero; every other entry algebraically
-//     reduces to 0 (ratio 1 there, multiplied by a 0 advantage).
+//     index by actionMask (one-hot per column: 1 at that column's
+//     sampled action, 0 elsewhere), so only that entry is nonzero in
+//     each column; every other entry algebraically reduces to 0 (ratio
+//     1 there, multiplied by a 0 advantage).
 //   - The entropy bonus is a genuine per-action sum (that's the
 //     definition of entropy), so every action contributes and no
 //     masking is needed.
-//   - The value loss is a single (1, 1) scalar; broadcasting it evenly
-//     into every entry of an (outputSize, 1) vector would multiply it by
-//     outputSize once summed, so it's instead broadcast into the
-//     sampled action's index only (via actionMask, through MatMul),
-//     contributing exactly once.
+//   - The value loss is a single (1, BatchSize) row, one scalar per
+//     column; broadcasting it evenly into every entry of an
+//     (outputSize, BatchSize) matrix would multiply it by outputSize
+//     once summed, so it's instead broadcast into each column's own
+//     sampled action's index only (via actionMask, through
+//     MulBroadcastCols), contributing exactly once per column.
 func buildLoss(
 	policyOutput, valueOutput *autograd.Var,
 	actionMask, oldLogProb, advantage, returnTarget *autograd.Var,
@@ -134,10 +141,12 @@ func buildPolicyLoss(logProbsNew, actionMask, oldLogProb, advantage *autograd.Va
 	return autograd.Neg(minSurrogate)
 }
 
-// buildValueLoss computes valueCoef*(value - returnTarget)^2 (both
-// (1, 1) scalars) and broadcasts the result into the sampled action's
-// index of an (outputSize, 1) vector (via actionMask, see this file's
-// doc comment), so it contributes to the combined loss exactly once.
+// buildValueLoss computes valueCoef*(value - returnTarget)^2 — each a
+// (1, BatchSize) row, one scalar per batch column — and broadcasts the
+// result into each column's own sampled action's index of an
+// (outputSize, BatchSize) matrix (via actionMask, see this file's doc
+// comment), so it contributes to the combined loss exactly once per
+// column.
 func buildValueLoss(value, returnTarget, actionMask *autograd.Var, valueCoef float32) (*autograd.Var, error) {
 	diff, err := autograd.Sub(value, returnTarget)
 	if err != nil {
@@ -148,25 +157,30 @@ func buildValueLoss(value, returnTarget, actionMask *autograd.Var, valueCoef flo
 		return nil, err
 	}
 
-	valueCoefVar := autograd.Constant(scalarMatrix(valueCoef))
+	valueCoefVar := autograd.Constant(filledMatrix(value.Val.Rows, value.Val.Cols, valueCoef))
 	scaledSquaredError, err := autograd.Mul(squaredError, valueCoefVar)
 	if err != nil {
 		return nil, err
 	}
 
-	// actionMask is (outputSize, 1), scaledSquaredError is (1, 1):
-	// MatMul(actionMask, scaledSquaredError)[i] = actionMask[i] *
-	// scaledSquaredError, i.e. the scalar value loss placed at the
-	// sampled action's index and 0 everywhere else.
-	return autograd.MatMul(actionMask, scaledSquaredError)
+	// actionMask is (outputSize, BatchSize), scaledSquaredError is
+	// (1, BatchSize): MulBroadcastCols(actionMask, scaledSquaredError)
+	// [i][j] = actionMask[i][j] * scaledSquaredError[0][j], i.e. column
+	// j's scalar value loss placed at that column's own sampled action's
+	// index and 0 everywhere else in that column — a true MatMul can't
+	// express this once BatchSize > 1 (its shared contraction dimension
+	// would need actionMask.Cols == scaledSquaredError.Rows, forcing
+	// BatchSize == 1), so this would otherwise silently mix one column's
+	// value loss into every other column's gradient.
+	return autograd.MulBroadcastCols(actionMask, scaledSquaredError)
 }
 
 // buildEntropyBonus computes entropyCoef * sum_a(-probs[a]*log(probs[a])),
 // i.e. entropyCoef times the policy's Shannon entropy, expressed as a
-// per-action (outputSize, 1) vector whose entries sum (via Backward's
-// implicit-sum trick) to that scalar. logProbsNew is accepted as a
-// parameter (rather than recomputed) since buildLoss's caller already
-// computed log(probs) for the policy loss.
+// per-action (outputSize, BatchSize) matrix whose entries sum (via
+// Backward's implicit-sum trick) to that scalar, per column.
+// logProbsNew is accepted as a parameter (rather than recomputed) since
+// buildLoss's caller already computed log(probs) for the policy loss.
 func buildEntropyBonus(probs, logProbsNew *autograd.Var, entropyCoef float32) (*autograd.Var, error) {
 	perActionEntropy, err := autograd.Mul(probs, logProbsNew)
 	if err != nil {
@@ -177,18 +191,18 @@ func buildEntropyBonus(probs, logProbsNew *autograd.Var, entropyCoef float32) (*
 		return nil, err
 	}
 
-	entropyCoefVar := autograd.Constant(filledColumn(probs.Val.Rows, entropyCoef))
+	entropyCoefVar := autograd.Constant(filledMatrix(probs.Val.Rows, probs.Val.Cols, entropyCoef))
 	return autograd.Mul(positiveEntropy, entropyCoefVar)
 }
 
-// scalarMatrix returns a 1x1 matrix holding value.
-func scalarMatrix(value float32) *mat.Matrix {
-	return &mat.Matrix{Rows: 1, Cols: 1, Data: []float32{value}}
-}
-
-// filledColumn returns a (rows, 1) matrix with every entry set to value.
-func filledColumn(rows int, value float32) *mat.Matrix {
-	m := mat.New(rows, 1)
+// filledMatrix returns a (rows, cols) matrix with every entry set to
+// value — e.g. a scalar hyperparameter (entropyCoef, valueCoef) that
+// doesn't vary by batch column, broadcast up front to whatever shape
+// the Var it's combined with actually has, rather than needing its own
+// broadcasting autograd op (it never needs a gradient, so there's
+// nothing Backward would need to do with it beyond this).
+func filledMatrix(rows, cols int, value float32) *mat.Matrix {
+	m := mat.New(rows, cols)
 	m.Fill(value)
 	return m
 }

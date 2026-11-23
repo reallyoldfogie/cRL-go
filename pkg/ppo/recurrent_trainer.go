@@ -236,7 +236,7 @@ func newRecurrentTrainer(settings config.Settings, env rl.Environment, initRNG *
 		EntropyCoef: settings.EntropyCoef,
 		ValueCoef:   settings.ValueCoef,
 	}
-	network, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, lossCfg)
+	network, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, maxUpdateBatchSize(settings), lossCfg)
 	if err != nil {
 		return nil, fmt.Errorf("ppo: building recurrent training network: %w", err)
 	}
@@ -280,6 +280,22 @@ func updateWorkerCount(settings config.Settings) int {
 	return n
 }
 
+// maxUpdateBatchSize is the fixed batch size every RecurrentTrainingNetwork
+// (tr.network and every one of tr.updateReplicas) is built with: the
+// largest share trainOnChunkMinibatch's near-even split
+// (splitChunksAcross) can ever hand to a single one of updateWorkerCount's
+// networks, for any minibatch up to settings.MinibatchSize chunks —
+// ceil(MinibatchSize / updateWorkerCount). Every network is allocated
+// at this one fixed size once, up front, rather than resized per
+// minibatch, so a smaller actual share (the common case whenever
+// MinibatchSize doesn't divide evenly, or a trailing minibatch is
+// shorter than MinibatchSize) is padded out to it instead — see
+// trainNetworkOnChunks.
+func maxUpdateBatchSize(settings config.Settings) int {
+	n := updateWorkerCount(settings)
+	return (settings.MinibatchSize + n - 1) / n
+}
+
 // newUpdateReplicas builds the extra RecurrentTrainingNetwork instances
 // tr.updateReplicas holds - see its own doc comment for why these are
 // safe to run concurrently against the same params as tr.network.
@@ -288,9 +304,10 @@ func updateWorkerCount(settings config.Settings) int {
 // casing.
 func newUpdateReplicas(params *actorcritic.RecurrentParams, settings config.Settings, lossCfg LossConfig) ([]*RecurrentTrainingNetwork, error) {
 	extra := updateWorkerCount(settings) - 1
+	batchSize := maxUpdateBatchSize(settings)
 	replicas := make([]*RecurrentTrainingNetwork, extra)
 	for i := range extra {
-		replica, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, lossCfg)
+		replica, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, batchSize, lossCfg)
 		if err != nil {
 			return nil, fmt.Errorf("ppo: building update replica network %d: %w", i, err)
 		}
@@ -687,27 +704,105 @@ func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) ep
 }
 
 // trainNetworkOnChunks is one goroutine's share of trainOnChunkMinibatch:
-// zero network's gradient, then replay every chunk in share through it
-// sequentially, exactly like the body of the pre-parallel
-// trainOnChunkMinibatch did for the whole minibatch. Safe to run
-// concurrently with any other call of this on a different network
-// instance (even one built from the same underlying params) - see
-// RecurrentTrainer.updateReplicas' own doc comment for why.
+// zero network's gradient once, then replay share through it in batches
+// of up to network.BatchSize chunks at a time (one Forward/Backward
+// call per batch, each one training every chunk in that batch together
+// — see trainBatch), accumulating gradients across every batch exactly
+// as the original, fully-sequential (one chunk, one Forward/Backward
+// call, every time) version did. Safe to run concurrently with any
+// other call of this on a different network instance (even one built
+// from the same underlying params) - see RecurrentTrainer.
+// updateReplicas' own doc comment for why.
+//
+// network.BatchSize is sized (see maxUpdateBatchSize) so that share,
+// coming from splitChunksAcross's near-even split, never actually
+// exceeds it — the loop below only exists to stay correct (processing
+// share in BatchSize-sized pieces rather than silently dropping
+// anything past the first BatchSize chunks) if that invariant is ever
+// violated by a future change, not because it's expected to run more
+// than once in practice.
 func trainNetworkOnChunks(network *RecurrentTrainingNetwork, share []recurrentChunk, cfg LossConfig) epochDiagnostics {
 	var diagnostics epochDiagnostics
 	network.Actor.ZeroGrad()
-	for _, chunk := range share {
-		network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
-		network.Graph.Forward()
+
+	for start := 0; start < len(share); start += network.BatchSize {
+		end := min(start+network.BatchSize, len(share))
+		batch := trainBatch(network, share[start:end], cfg)
+		diagnostics.policyLossSum += batch.policyLossSum
+		diagnostics.valueLossSum += batch.valueLossSum
+		diagnostics.entropySum += batch.entropySum
+		diagnostics.steps += batch.steps
+	}
+	return diagnostics
+}
+
+// trainBatch trains up to network.BatchSize chunks (batch, which must
+// have at most that many entries) together in exactly one
+// Forward/Backward call: each chunk occupies its own batch column
+// (real chunks first, then any remaining columns padded out with a
+// fully-masked, zero-contribution chunk — see paddingChunk and
+// StepMask's own doc comment for why a padding column's otherwise-
+// arbitrary forward values can never affect the real columns' gradient:
+// every op from AddBias/MulBroadcastCols down to plain elementwise Add/
+// Mul treats columns independently, so a real column's result and
+// gradient depend only on that column's own inputs, never on what
+// value — zero, garbage, or otherwise — happens to sit in a different
+// column).
+func trainBatch(network *RecurrentTrainingNetwork, batch []recurrentChunk, cfg LossConfig) epochDiagnostics {
+	var diagnostics epochDiagnostics
+
+	for col, chunk := range batch {
+		network.SetSplitChunkColumn(col, chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
+	}
+	if len(batch) < network.BatchSize {
+		pad := paddingChunk(network)
+		for col := len(batch); col < network.BatchSize; col++ {
+			network.SetSplitChunkColumn(col, pad.Steps, pad.PolicyHPrevStart, pad.PolicyCPrevStart, pad.ValueHPrevStart, pad.ValueCPrevStart)
+		}
+	}
+
+	network.Graph.Forward()
+
+	outputSize := network.Actor.PolicyOutput[0].Val.Rows
+	policyColumn := make([]float32, outputSize)
+	for col, chunk := range batch {
 		for t, step := range chunk.Steps {
 			if !step.Real {
 				continue
 			}
-			diagnostics.observeStep(network.Actor.PolicyOutput[t].Val.Data, network.Actor.ValueOutput[t].Val.Data[0], step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
+			network.Actor.PolicyOutput[t].Val.Column(col, policyColumn)
+			value := network.Actor.ValueOutput[t].Val.Data[col]
+			diagnostics.observeStep(policyColumn, value, step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
 		}
-		network.Graph.Backward()
 	}
+
+	network.Graph.Backward()
 	return diagnostics
+}
+
+// paddingChunk returns a chunkLen-long, entirely-padding (Real: false
+// everywhere) chunk sized for network, used by trainBatch to fill out
+// any batch columns beyond the chunks actually available this call.
+// Its starting hidden/cell state is zero (an arbitrary but always-
+// finite choice — any finite state works equally correctly, since
+// StepMask zeroes this column's entire contribution regardless of what
+// values its forward pass happens to produce; see trainBatch's own doc
+// comment).
+func paddingChunk(network *RecurrentTrainingNetwork) recurrentChunk {
+	inputSize := network.Actor.Input[0].Val.Rows
+	hiddenSize := network.Actor.PolicyHPrevIn.Val.Rows
+
+	steps := make([]recurrentTrainingStep, network.ChunkLen)
+	for i := range steps {
+		steps[i] = recurrentTrainingStep{Observation: rl.Observation{Values: make([]float32, inputSize)}, Real: false}
+	}
+
+	zeroState := make([]float32, hiddenSize)
+	return recurrentChunk{
+		Steps:            steps,
+		PolicyHPrevStart: zeroState, PolicyCPrevStart: zeroState,
+		ValueHPrevStart: zeroState, ValueCPrevStart: zeroState,
+	}
 }
 
 // splitChunksAcross divides chunks into n near-even, contiguous shares
