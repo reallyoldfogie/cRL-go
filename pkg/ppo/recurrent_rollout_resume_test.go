@@ -34,8 +34,14 @@ func newRecurrentPoolTrainer(t *testing.T, n int) (*RecurrentTrainer, []*poolTra
 // TestRecurrentResumeRolloutsSkipsAlreadyCollectedSlots covers the
 // 2026-11-02 feature: a crash mid-epoch shouldn't force re-collecting
 // trajectories the epoch had already finished before it died.
-// ResumeRollouts' pre-filled slots must be left untouched (their owning
-// env never re-reset) while a nil slot still gets collected normally.
+// ResumeRollouts' pre-filled slots must be left untouched (returned
+// exactly as supplied, their owning env never re-reset) while a nil
+// slot still gets collected normally - by whichever env's goroutine
+// happens to claim it, not necessarily the env at that same numeric
+// index (collectRecurrentRolloutsPool's work-stealing no longer
+// guarantees env[i] claims slot[i] - see its own doc comment), so this
+// checks the pool's total reset count rather than pinning the
+// collection to one specific env.
 func TestRecurrentResumeRolloutsSkipsAlreadyCollectedSlots(t *testing.T) {
 	trainer, tracked := newRecurrentPoolTrainer(t, 3)
 
@@ -56,12 +62,18 @@ func TestRecurrentResumeRolloutsSkipsAlreadyCollectedSlots(t *testing.T) {
 	// resumed[1] stays nil - that slot still needs collecting.
 	trainer.ResumeRollouts(resumed)
 
-	_, err = trainer.collectRollouts(context.Background(), 1)
+	result, err := trainer.collectRollouts(context.Background(), 1)
 	require.NoError(t, err)
 
-	assert.EqualValues(t, 0, atomic.LoadInt32(tracked[0].resetCount), "env 0's rollout was supplied via ResumeRollouts - it must not be re-collected")
-	assert.EqualValues(t, 1, atomic.LoadInt32(tracked[1].resetCount), "env 1's slot was nil - it must still be collected")
-	assert.EqualValues(t, 0, atomic.LoadInt32(tracked[2].resetCount), "env 2's rollout was supplied via ResumeRollouts - it must not be re-collected")
+	assert.Same(t, resumed[0], result[0], "slot 0 was supplied via ResumeRollouts - it must be returned untouched")
+	assert.Same(t, resumed[2], result[2], "slot 2 was supplied via ResumeRollouts - it must be returned untouched")
+	require.NotNil(t, result[1], "slot 1 was nil - it must have been freshly collected")
+
+	var totalResets int32
+	for _, tr := range tracked {
+		totalResets += atomic.LoadInt32(tr.resetCount)
+	}
+	assert.EqualValues(t, 1, totalResets, "exactly one fresh collection should have happened, for the one un-resumed slot")
 }
 
 // TestRecurrentSetRolloutProgressFiresOnlyForFreshCollections covers the
@@ -119,14 +131,21 @@ func TestRecurrentResumeRolloutsConsumedExactlyOnce(t *testing.T) {
 	}
 
 	// No ResumeRollouts call this time - every slot must be freshly
-	// collected, including env 0's (whose rollout was only ever supplied
-	// for epoch 1, not this one).
+	// collected, even the one epoch 1 got from ResumeRollouts (only ever
+	// supplied for that one call, not this one). Checks the pool's total
+	// reset count rather than each env individually - work-stealing no
+	// longer guarantees any particular env claims any particular slot
+	// (see collectRecurrentRolloutsPool's own doc comment), so a single
+	// fast env could legitimately claim more than one of the 3 slots
+	// while another claims none, with the total still correctly at 3.
 	_, err = trainer.collectRollouts(context.Background(), 2)
 	require.NoError(t, err)
 
-	for i, tr := range tracked {
-		assert.EqualValues(t, 1, atomic.LoadInt32(tr.resetCount), "env %d must be freshly collected once ResumeRollouts' one-shot supply has been consumed", i)
+	var totalResets int32
+	for _, tr := range tracked {
+		totalResets += atomic.LoadInt32(tr.resetCount)
 	}
+	assert.EqualValues(t, 3, totalResets, "every slot must be freshly collected once ResumeRollouts' one-shot supply has been consumed")
 }
 
 // TestRecurrentResumeRolloutsPanicsOnWrongLength covers ResumeRollouts'

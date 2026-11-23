@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
@@ -428,21 +429,33 @@ func (tr *Trainer) collectRolloutsSequential(ctx context.Context, epoch int) ([]
 // concurrent goroutines — one per pooled environment, for the
 // goroutine's entire lifetime, never shared — rather than
 // settings.Workers (see NewWithPersistentEnvPool's own doc comment for
-// why). Episode indices are striped across workers (worker, worker+n,
-// worker+2n, ...) so every episode still gets its own deterministic
-// WorkerRNG(settings.Seed, epoch, i) exactly as
-// collectRolloutsParallel/collectRolloutsSequential already do — i is
-// the global episode index, not a per-worker-local one, so a fixed seed
-// continues to reproduce the same set of episode streams regardless of
-// how many envs the pool contains or how work happens to interleave
-// across them. A worker stops (recording its own error) at its own
-// first error rather than continuing to its next striped episode
-// against a session that just failed, mirroring
-// collectRolloutsSequential's own early-return-on-error behavior.
+// why).
+//
+// Each goroutine permanently owns exactly one env for its entire
+// lifetime (that invariant is untouched), but which episode index it
+// works on next is a shared work-stealing queue, not a fixed stripe
+// (worker, worker+n, worker+2n, ...) - see
+// RecurrentTrainer.collectRecurrentRolloutsPool's own doc comment (this
+// mirrors it exactly) for the live incident that motivated this and why
+// it changes nothing about reproducibility: WorkerRNG(settings.Seed,
+// epoch, i) is a pure function of the episode index i, never of which
+// physical env executed it. A worker stops (recording its own error) at
+// its own first error rather than claiming another index against a
+// session that just failed, mirroring collectRolloutsSequential's own
+// early-return-on-error behavior.
 func (tr *Trainer) collectRolloutsPool(ctx context.Context, epoch int) ([]*Rollout, error) {
 	n := len(tr.persistentEnvs)
 	rollouts := make([]*Rollout, tr.settings.RolloutSize)
 	errs := make([]error, tr.settings.RolloutSize)
+
+	var nextIndex atomic.Int64
+	claim := func() (int, bool) {
+		i := int(nextIndex.Add(1)) - 1
+		if i >= tr.settings.RolloutSize {
+			return 0, false
+		}
+		return i, true
+	}
 
 	var wg sync.WaitGroup
 	for worker := 0; worker < n; worker++ {
@@ -450,7 +463,11 @@ func (tr *Trainer) collectRolloutsPool(ctx context.Context, epoch int) ([]*Rollo
 		go func(worker int) {
 			defer wg.Done()
 			env := tr.persistentEnvs[worker]
-			for i := worker; i < tr.settings.RolloutSize; i += n {
+			for {
+				i, ok := claim()
+				if !ok {
+					return
+				}
 				rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, i)
 				rollout, err := collectTrajectoryFromEnv(ctx, tr.params, env, tr.settings.EpisodeLen, rng)
 				if err != nil {

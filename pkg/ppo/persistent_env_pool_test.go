@@ -18,14 +18,24 @@ import (
 // reset count. A brief sleep inside both methods widens the race window
 // so collectRolloutsPool sharing one env across two goroutines would
 // reliably be caught by maxSeen > 1, not just theoretically possible.
+// delay defaults to a millisecond (see newPoolTrackingEnv) but is
+// overridable via newPoolTrackingEnvWithDelay - TestCollectRolloutsPool
+// FavorsFasterEnvsUnderWorkStealing uses two different delays on
+// purpose, to assert the whole point of work-stealing rather than just
+// its mechanics.
 type poolTrackingEnv struct {
 	current    *int32
 	maxSeen    *int32
 	resetCount *int32
+	delay      time.Duration
 }
 
 func newPoolTrackingEnv() *poolTrackingEnv {
-	return &poolTrackingEnv{current: new(int32), maxSeen: new(int32), resetCount: new(int32)}
+	return newPoolTrackingEnvWithDelay(time.Millisecond)
+}
+
+func newPoolTrackingEnvWithDelay(delay time.Duration) *poolTrackingEnv {
+	return &poolTrackingEnv{current: new(int32), maxSeen: new(int32), resetCount: new(int32), delay: delay}
 }
 
 func (e *poolTrackingEnv) enter() {
@@ -46,14 +56,14 @@ func (e *poolTrackingEnv) Reset(ctx context.Context) (rl.Observation, error) {
 	e.enter()
 	defer e.exit()
 	atomic.AddInt32(e.resetCount, 1)
-	time.Sleep(time.Millisecond)
+	time.Sleep(e.delay)
 	return rl.Observation{Values: []float32{0, 0}}, nil
 }
 
 func (e *poolTrackingEnv) Step(ctx context.Context, action rl.Action) (rl.StepResult, error) {
 	e.enter()
 	defer e.exit()
-	time.Sleep(time.Millisecond)
+	time.Sleep(e.delay)
 	return rl.StepResult{Observation: rl.Observation{Values: []float32{0, 0}}, Reward: 1, Done: true}, nil
 }
 
@@ -83,10 +93,15 @@ func TestNewWithPersistentEnvPoolRejectsEmptyEnvs(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestCollectRolloutsPoolDistributesAcrossAllEnvs confirms
-// RolloutSize episodes are striped across every pooled env even when
-// RolloutSize doesn't divide evenly by the pool size.
-func TestCollectRolloutsPoolDistributesAcrossAllEnvs(t *testing.T) {
+// TestCollectRolloutsPoolCollectsExactlyRolloutSizeAcrossThePool confirms
+// every one of RolloutSize episodes is collected exactly once across the
+// pool, even when RolloutSize doesn't divide evenly by the pool size -
+// collectRolloutsPool's work-stealing (see its own doc comment) no
+// longer guarantees any particular env collects any particular share, so
+// this checks the pool's total rather than each env's individual count -
+// see TestCollectRolloutsPoolFavorsFasterEnvsUnderWorkStealing below for
+// the property that replaced the old even-split guarantee.
+func TestCollectRolloutsPoolCollectsExactlyRolloutSizeAcrossThePool(t *testing.T) {
 	settings := persistentTestSettings()
 	settings.RolloutSize = 7
 
@@ -105,13 +120,38 @@ func TestCollectRolloutsPoolDistributesAcrossAllEnvs(t *testing.T) {
 	require.NoError(t, err)
 
 	var total int32
-	for i, env := range tracked {
-		count := atomic.LoadInt32(env.resetCount)
-		total += count
-		assert.InDeltaf(t, float64(settings.RolloutSize)/n, float64(count), 1,
-			"env %d got %d episodes, expected close to RolloutSize/n", i, count)
+	for _, env := range tracked {
+		total += atomic.LoadInt32(env.resetCount)
 	}
 	assert.Equal(t, int32(settings.RolloutSize), total, "every episode must be collected exactly once across the pool")
+}
+
+// TestCollectRolloutsPoolFavorsFasterEnvsUnderWorkStealing is the actual
+// point of switching collectRolloutsPool from a fixed per-env stripe to a
+// shared work-stealing queue (see its own doc comment for the live
+// incident this answers): an env stuck with slow episodes must no longer
+// leave a fast one idle once its own fixed share runs out - instead the
+// fast env should pick up the slack and collect more of the epoch's
+// trajectories than the slow one, with the total still landing exactly
+// on RolloutSize.
+func TestCollectRolloutsPoolFavorsFasterEnvsUnderWorkStealing(t *testing.T) {
+	settings := persistentTestSettings()
+	settings.RolloutSize = 20
+
+	fast := newPoolTrackingEnvWithDelay(0)
+	slow := newPoolTrackingEnvWithDelay(5 * time.Millisecond)
+	envs := []rl.Environment{fast, slow}
+
+	trainer, err := NewWithPersistentEnvPool(settings, envs, nil)
+	require.NoError(t, err)
+
+	_, err = trainer.RunEpoch(context.Background(), 0)
+	require.NoError(t, err)
+
+	fastCount := atomic.LoadInt32(fast.resetCount)
+	slowCount := atomic.LoadInt32(slow.resetCount)
+	assert.Equal(t, int32(settings.RolloutSize), fastCount+slowCount, "every episode must still be collected exactly once across the pool")
+	assert.Greaterf(t, fastCount, slowCount, "the fast env (collected %d) should pick up the slack and collect more than the slow one (collected %d), not sit idle once an old fixed stripe would have run out", fastCount, slowCount)
 }
 
 // TestCollectRolloutsPoolNeverSharesOneEnvAcrossGoroutines is the actual
@@ -163,11 +203,17 @@ func TestNewWithPersistentEnvPoolPropagatesContextCancellation(t *testing.T) {
 
 // TestNewWithPersistentEnvPoolSurfacesPerEnvError confirms one pooled
 // worker's error reaches the caller through RunEpoch rather than being
-// dropped by sync.WaitGroup.
+// dropped by sync.WaitGroup. Both envs error here, not just one - with
+// collectRolloutsPool's own work-stealing (see its own doc comment),
+// which of several pooled envs ends up claiming any given trajectory
+// index is no longer deterministic, so a single erroring env alongside
+// a healthy one could race to never actually be called at all. Every
+// claimed trajectory failing, regardless of which env claims it, is
+// what makes this assertion timing-independent again.
 func TestNewWithPersistentEnvPoolSurfacesPerEnvError(t *testing.T) {
 	settings := persistentTestSettings()
 
-	envs := []rl.Environment{erroringEnv{}, countingEnv{resetCount: new(int)}}
+	envs := []rl.Environment{erroringEnv{}, erroringEnv{}}
 	trainer, err := NewWithPersistentEnvPool(settings, envs, nil)
 	require.NoError(t, err)
 

@@ -77,10 +77,12 @@ func TestNewRecurrentWithPersistentEnvPoolRejectsEmptyEnvs(t *testing.T) {
 }
 
 // TestRecurrentCollectRolloutsPoolDistributesAcrossAllEnvs mirrors
-// TestCollectRolloutsPoolDistributesAcrossAllEnvs: RolloutSize episodes
-// must be striped across every pooled env even when it doesn't divide
-// evenly by the pool size, and no two goroutines ever touch the same
-// pooled env concurrently.
+// TestCollectRolloutsPoolCollectsExactlyRolloutSizeAcrossThePool: every
+// one of RolloutSize episodes must land on exactly one pooled env even
+// when it doesn't divide evenly by the pool size (work-stealing, not a
+// fixed per-env stripe - see collectRecurrentRolloutsPool's own doc
+// comment), and no two goroutines ever touch the same pooled env
+// concurrently.
 func TestRecurrentCollectRolloutsPoolDistributesAcrossAllEnvs(t *testing.T) {
 	settings := recurrentPersistentTestSettings()
 	settings.RolloutSize = 7

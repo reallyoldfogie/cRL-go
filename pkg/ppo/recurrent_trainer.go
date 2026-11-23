@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
@@ -445,17 +446,55 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsSequential(ctx context.Conte
 // trajectories across tr.persistentEnvs, bounded to exactly
 // len(tr.persistentEnvs) concurrent goroutines — mirroring
 // Trainer.collectRolloutsPool exactly, including its own
-// episode-striping and early-return-on-error behavior. Slots already
+// work-stealing and early-return-on-error behavior. Slots already
 // supplied via ResumeRollouts are left as-is rather than re-collected -
-// see SetRolloutProgress's own doc comment. Each worker only ever reads
-// or writes its own disjoint stripe of indices (i := worker; i < size; i
-// += n), so checking/writing rollouts[i] from multiple goroutines here
-// needs no locking: no two workers ever touch the same index.
+// see SetRolloutProgress's own doc comment.
+//
+// Each goroutine permanently owns exactly one env for its entire
+// lifetime (never shared - see NewWithPersistentEnvPool's own doc
+// comment for why that invariant matters), but which TRAJECTORY INDEX
+// it works on next is no longer a fixed stripe (i, i+n, i+2n, ...) -
+// every goroutine instead claims the next not-yet-spoken-for index from
+// a single shared, atomically-incremented counter the moment it's free.
+// Found live, 2026-11-22: under the old fixed stripe, an env whose own
+// share of episodes all happened to be short finished its entire stripe
+// early and then sat completely idle - sometimes for minutes - waiting
+// for a same-length stripe assigned to an env stuck on long episodes,
+// even though it could have picked up several more of those in the
+// meantime. Work-stealing means a fast env simply collects more of the
+// epoch's trajectories and a slow one collects fewer, bounded only by
+// total work divided by pool size, not by whichever single env happens
+// to draw the worst luck.
+//
+// This changes nothing about reproducibility: WorkerRNG(settings.Seed,
+// epoch, i) is a pure function of the trajectory index i, never of
+// which physical env or goroutine executed it (see WorkerRNG's own doc
+// comment), so a fixed seed still derives the exact same per-trajectory
+// random streams regardless of which env ends up claiming which index.
 func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, epoch int) ([]*RecurrentRollout, error) {
 	n := len(tr.persistentEnvs)
 	rollouts := make([]*RecurrentRollout, tr.settings.RolloutSize)
 	copy(rollouts, tr.takeResume())
 	errs := make([]error, tr.settings.RolloutSize)
+
+	// nextIndex is the shared work queue every goroutine claims from -
+	// see this function's own doc comment. Pre-resumed slots are valid
+	// RecurrentRollout values already in rollouts (never written to
+	// again by anything below), so claiming only ever skips past them,
+	// it never races a concurrent write to one.
+	var nextIndex atomic.Int64
+	claim := func() (int, bool) {
+		for {
+			i := int(nextIndex.Add(1)) - 1
+			if i >= tr.settings.RolloutSize {
+				return 0, false
+			}
+			if rollouts[i] != nil {
+				continue
+			}
+			return i, true
+		}
+	}
 
 	var wg sync.WaitGroup
 	for worker := 0; worker < n; worker++ {
@@ -463,9 +502,10 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, ep
 		go func(worker int) {
 			defer wg.Done()
 			env := tr.persistentEnvs[worker]
-			for i := worker; i < tr.settings.RolloutSize; i += n {
-				if rollouts[i] != nil {
-					continue
+			for {
+				i, ok := claim()
+				if !ok {
+					return
 				}
 				rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, i)
 				rollout, err := collectRecurrentTrajectoryFromEnv(ctx, tr.params, env, tr.settings.EpisodeLen, rng)
