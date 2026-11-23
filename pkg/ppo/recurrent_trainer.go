@@ -256,14 +256,29 @@ func newRecurrentTrainer(settings config.Settings, env rl.Environment, initRNG *
 	}, nil
 }
 
+// updateWorkerReservedCPUs is how many of runtime.NumCPU()'s cores
+// updateWorkerCount deliberately leaves unclaimed. Found live, 2026-11-23
+// (mc-rsi-trainer, a 6-core host): claiming every core for the update
+// phase left nothing for the live Minecraft server, Grafana, Prometheus
+// and Docker sharing the same box - load average roughly double the
+// core count, 13%+ iowait and the process's own memory partly swapped
+// out, none of which showed up as a correctness problem, only as
+// contention this package has no way to see from inside itself. This
+// package still can't know what else shares its host, so it reserves a
+// fixed, modest amount rather than trying to detect it - the operator is
+// in a far better position to size this per-host than any heuristic
+// here would be.
+const updateWorkerReservedCPUs = 2
+
 // updateWorkerCount is how many RecurrentTrainingNetwork instances
 // (tr.network plus tr.updateReplicas) trainOnChunkMinibatch splits a
-// minibatch's chunks across - runtime.NumCPU(), capped at
-// settings.MinibatchSize since a worker with no chunk ever assigned to
-// it would just be wasted memory, and floored at 1 so a single-core
-// host (or MinibatchSize==1) still works exactly as before this existed.
+// minibatch's chunks across - runtime.NumCPU() minus
+// updateWorkerReservedCPUs, capped at settings.MinibatchSize since a
+// worker with no chunk ever assigned to it would just be wasted memory,
+// and floored at 1 so a small-core host (or MinibatchSize==1) still
+// works exactly as before either of these existed.
 func updateWorkerCount(settings config.Settings) int {
-	n := runtime.NumCPU()
+	n := runtime.NumCPU() - updateWorkerReservedCPUs
 	if n > settings.MinibatchSize {
 		n = settings.MinibatchSize
 	}
