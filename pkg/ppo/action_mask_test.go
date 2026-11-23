@@ -46,9 +46,10 @@ func (*maskedEnv) ActionMask() []bool   { return []bool{true, false, true} }
 func TestActionMaskExcludesIllegalActionAndIsRecorded(t *testing.T) {
 	env := &maskedEnv{}
 	rng := rand.New(rand.NewPCG(1, 2))
-	params := actorcritic.NewParams(rng, env.ObservationSize(), 4, env.ActionSpace(), 2)
+	policyParams := actorcritic.NewParams(rng, env.ObservationSize(), 4, env.ActionSpace(), 2)
+	valueParams := actorcritic.NewParams(rng, env.ObservationSize(), 4, env.ActionSpace(), 2)
 
-	rollout, err := collectTrajectoryFromEnv(context.Background(), params, env, 20, rng)
+	rollout, err := collectTrajectoryFromEnv(context.Background(), policyParams, valueParams, env, 20, rng)
 	require.NoError(t, err)
 	require.NotEmpty(t, rollout.Episode.Transitions)
 

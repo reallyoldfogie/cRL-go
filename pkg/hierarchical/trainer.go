@@ -29,10 +29,10 @@ type EpochStats struct {
 // Trainer runs the hierarchical PPO training loop described in
 // docs/plans/11-hierarchical-meta-controller-and-subpolicies.md: a
 // meta-controller and one sub-policy per subgoal, each an independent
-// actorcritic.Params/ppo.TrainingNetwork/actorcritic.Adam triple,
+// actorcritic.Params/ppo.SharedTrunkTrainingNetwork/actorcritic.Adam triple,
 // trained with the exact same GAE-then-PPO-clip recipe
 // pkg/ppo.Trainer uses for a single flat policy. See
-// ppo.NewTrainingNetwork and ppo.ComputeGAE, both reused directly here
+// ppo.NewSharedTrunkTrainingNetwork and ppo.ComputeGAE, both reused directly here
 // rather than reimplemented.
 type Trainer struct {
 	settings   config.Settings
@@ -40,11 +40,11 @@ type Trainer struct {
 	envFactory reinforce.EnvFactory
 
 	metaParams  *actorcritic.Params
-	metaNetwork *ppo.TrainingNetwork
+	metaNetwork *ppo.SharedTrunkTrainingNetwork
 	metaAdam    *actorcritic.Adam
 
 	subParams   map[Subgoal]*actorcritic.Params
-	subNetworks map[Subgoal]*ppo.TrainingNetwork
+	subNetworks map[Subgoal]*ppo.SharedTrunkTrainingNetwork
 	subAdams    map[Subgoal]*actorcritic.Adam
 }
 
@@ -172,13 +172,13 @@ func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory, 
 	} else {
 		metaParams = actorcritic.NewParams(initRNG, env.ObservationSize(), cfg.MetaHiddenSize, cfg.NumSubgoals, 2)
 	}
-	metaNetwork, err := ppo.NewTrainingNetwork(metaParams, lossConfigFrom(settings))
+	metaNetwork, err := ppo.NewSharedTrunkTrainingNetwork(metaParams, lossConfigFrom(settings))
 	if err != nil {
 		return nil, fmt.Errorf("hierarchical: building meta-controller training network: %w", err)
 	}
 
 	subParams := make(map[Subgoal]*actorcritic.Params, cfg.NumSubgoals)
-	subNetworks := make(map[Subgoal]*ppo.TrainingNetwork, cfg.NumSubgoals)
+	subNetworks := make(map[Subgoal]*ppo.SharedTrunkTrainingNetwork, cfg.NumSubgoals)
 	subAdams := make(map[Subgoal]*actorcritic.Adam, cfg.NumSubgoals)
 	for i := range cfg.NumSubgoals {
 		subgoal := Subgoal(i)
@@ -193,7 +193,7 @@ func New(settings config.Settings, cfg Config, envFactory reinforce.EnvFactory, 
 			params = actorcritic.NewParams(initRNG, env.ObservationSize()+cfg.NumSubgoals, cfg.SubHiddenSize, env.ActionSpace(), 2)
 		}
 
-		network, err := ppo.NewTrainingNetwork(params, lossConfigFrom(settings))
+		network, err := ppo.NewSharedTrunkTrainingNetwork(params, lossConfigFrom(settings))
 		if err != nil {
 			return nil, fmt.Errorf("hierarchical: building sub-policy training network for subgoal %d: %w", subgoal, err)
 		}
@@ -315,7 +315,7 @@ func (tr *Trainer) collectRollouts(ctx context.Context, epoch int) ([]*Hierarchi
 // minibatch loop exactly (duplicated here because pkg/ppo.Trainer's own
 // version is a private method tied to its own single network/optimizer
 // fields, not reusable across packages).
-func trainNetwork(network *ppo.TrainingNetwork, adam *actorcritic.Adam, steps []trainingStep, settings config.Settings, shuffleRNG *rand.Rand) int {
+func trainNetwork(network *ppo.SharedTrunkTrainingNetwork, adam *actorcritic.Adam, steps []trainingStep, settings config.Settings, shuffleRNG *rand.Rand) int {
 	updateCount := 0
 	for range settings.PPOEpochs {
 		shuffleRNG.Shuffle(len(steps), func(i, j int) {
@@ -336,7 +336,7 @@ func trainNetwork(network *ppo.TrainingNetwork, adam *actorcritic.Adam, steps []
 // averaged over len(minibatch) — identical in shape to
 // pkg/ppo.Trainer.trainOnMinibatch, duplicated for the same reason as
 // trainNetwork above.
-func trainOnMinibatch(network *ppo.TrainingNetwork, adam *actorcritic.Adam, minibatch []trainingStep) {
+func trainOnMinibatch(network *ppo.SharedTrunkTrainingNetwork, adam *actorcritic.Adam, minibatch []trainingStep) {
 	network.Actor.ZeroGrad()
 
 	for _, step := range minibatch {

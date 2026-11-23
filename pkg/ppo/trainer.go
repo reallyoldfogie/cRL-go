@@ -77,9 +77,26 @@ type Trainer struct {
 	// one.
 	persistentEnvs []rl.Environment
 
-	params  *actorcritic.Params
-	network *TrainingNetwork
-	adam    *actorcritic.Adam
+	// policyParams and valueParams back network's PolicyActor/ValueActor
+	// respectively — see ActorCriticParams and TrainingNetwork's own doc
+	// comments for why they must be, and stay, two distinct
+	// *actorcritic.Params instances.
+	policyParams *actorcritic.Params
+	valueParams  *actorcritic.Params
+	network      *TrainingNetwork
+	adam         *actorcritic.Adam
+}
+
+// ActorCriticParams bundles the independent policy-branch and
+// value-branch actor-critic Params a Trainer trains (see
+// TrainingNetwork's own doc comment for why they're two disjoint
+// *actorcritic.Params instances rather than one shared network, mirroring
+// RecurrentParams' PolicyTrunk/ValueTrunk split without an LSTM). Policy
+// and Value must both be set, or both left nil (meaning "initialize
+// fresh") — see New's initialParams parameter.
+type ActorCriticParams struct {
+	Policy *actorcritic.Params
+	Value  *actorcritic.Params
 }
 
 // New constructs a Trainer from settings and envFactory, validating
@@ -89,7 +106,7 @@ type Trainer struct {
 // Trainer collects rollouts in parallel across settings.Workers
 // goroutines, rebuilding an environment per episode; see
 // NewWithPersistentEnv for a long-lived-environment alternative.
-func New(settings config.Settings, envFactory reinforce.EnvFactory, initialParams *actorcritic.Params) (*Trainer, error) {
+func New(settings config.Settings, envFactory reinforce.EnvFactory, initialParams *ActorCriticParams) (*Trainer, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
@@ -117,7 +134,7 @@ func New(settings config.Settings, envFactory reinforce.EnvFactory, initialParam
 // sequentially on the calling goroutine rather than across
 // settings.Workers goroutines, since there is only one environment
 // instance to drive; settings.Workers is simply unused in that case.
-func NewWithPersistentEnv(settings config.Settings, persistentFactory reinforce.PersistentEnvFactory, initialParams *actorcritic.Params) (*Trainer, error) {
+func NewWithPersistentEnv(settings config.Settings, persistentFactory reinforce.PersistentEnvFactory, initialParams *ActorCriticParams) (*Trainer, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
@@ -159,7 +176,7 @@ func NewWithPersistentEnv(settings config.Settings, persistentFactory reinforce.
 // applicable) before and after this Trainer's use of them; this
 // constructor and the Trainer it returns never construct or close an
 // environment themselves.
-func NewWithPersistentEnvPool(settings config.Settings, envs []rl.Environment, initialParams *actorcritic.Params) (*Trainer, error) {
+func NewWithPersistentEnvPool(settings config.Settings, envs []rl.Environment, initialParams *ActorCriticParams) (*Trainer, error) {
 	if len(envs) == 0 {
 		return nil, fmt.Errorf("ppo: envs must contain at least one environment")
 	}
@@ -183,15 +200,25 @@ func NewWithPersistentEnvPool(settings config.Settings, envs []rl.Environment, i
 // initialParams, to validate against it) — it is not itself stored on
 // the returned Trainer; callers set either envFactory or persistentEnv
 // afterward depending on which constructor they came from.
-func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand, initialParams *actorcritic.Params) (*Trainer, error) {
-	params := initialParams
-	if params == nil {
-		params = actorcritic.NewParams(initRNG, env.ObservationSize(), settings.HiddenSize, env.ActionSpace(), 2)
-	} else if err := validateParamsShape(params, env, settings); err != nil {
-		return nil, err
+func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand, initialParams *ActorCriticParams) (*Trainer, error) {
+	var policyParams, valueParams *actorcritic.Params
+	switch {
+	case initialParams == nil:
+		policyParams = actorcritic.NewParams(initRNG, env.ObservationSize(), settings.HiddenSize, env.ActionSpace(), 2)
+		valueParams = actorcritic.NewParams(initRNG, env.ObservationSize(), settings.HiddenSize, env.ActionSpace(), 2)
+	case initialParams.Policy == nil || initialParams.Value == nil:
+		return nil, fmt.Errorf("ppo: initialParams must set both Policy and Value, or be nil")
+	default:
+		policyParams, valueParams = initialParams.Policy, initialParams.Value
+		if err := validateParamsShape(policyParams, env, settings); err != nil {
+			return nil, err
+		}
+		if err := validateParamsShape(valueParams, env, settings); err != nil {
+			return nil, err
+		}
 	}
 
-	network, err := NewTrainingNetwork(params, LossConfig{
+	network, err := NewTrainingNetwork(policyParams, valueParams, LossConfig{
 		ClipEpsilon: settings.ClipEpsilon,
 		EntropyCoef: settings.EntropyCoef,
 		ValueCoef:   settings.ValueCoef,
@@ -201,10 +228,11 @@ func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand
 	}
 
 	return &Trainer{
-		settings: settings,
-		params:   params,
-		network:  network,
-		adam:     actorcritic.NewAdamWithGradClip(network.Actor.Parameters(), settings.LearningRate, settings.MaxGradNorm),
+		settings:     settings,
+		policyParams: policyParams,
+		valueParams:  valueParams,
+		network:      network,
+		adam:         actorcritic.NewAdamWithGradClip(network.Parameters(), settings.LearningRate, settings.MaxGradNorm),
 	}, nil
 }
 
@@ -244,12 +272,13 @@ func validateParamsShape(params *actorcritic.Params, env rl.Environment, setting
 	return nil
 }
 
-// Params returns the Trainer's current actor-critic parameters, e.g. to
-// save a checkpoint (see actorcritic.Params.Save/SaveFile) after
-// training so a later session can resume from it via New's
+// Params returns the Trainer's current policy/value actor-critic
+// parameters, e.g. to save a checkpoint (see
+// actorcritic.Params.Save/SaveFile, applied to each of .Policy/.Value)
+// after training so a later session can resume from it via New's
 // initialParams.
-func (tr *Trainer) Params() *actorcritic.Params {
-	return tr.params
+func (tr *Trainer) Params() *ActorCriticParams {
+	return &ActorCriticParams{Policy: tr.policyParams, Value: tr.valueParams}
 }
 
 // OptimizerState returns the Adam continuation state for checkpointing.
@@ -304,10 +333,14 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 			// the whole batch before a single ApplyGradientStep — PPO
 			// repeats this accumulate-then-update cycle once per
 			// minibatch. A concurrent Params.Snapshot (e.g. a live
-			// inference Actor sharing tr.params) must never observe a
-			// partially-applied minibatch update. See
+			// inference Actor sharing tr.policyParams/tr.valueParams)
+			// must never observe a partially-applied minibatch update.
+			// Both locks are always acquired/released in the same order
+			// (policy then value) so this can never deadlock against
+			// another goroutine doing the same. See
 			// docs/plans/09-concurrency-safe-live-inference.md.
-			tr.params.Lock()
+			tr.policyParams.Lock()
+			tr.valueParams.Lock()
 			diagnosticsForBatch := tr.trainOnMinibatch(steps[start:end])
 			diagnostics.policyLossSum += diagnosticsForBatch.policyLossSum
 			diagnostics.valueLossSum += diagnosticsForBatch.valueLossSum
@@ -318,7 +351,8 @@ func (tr *Trainer) RunEpoch(ctx context.Context, epoch int) (EpochStats, error) 
 			diagnostics.policyGradNormSum += diagnosticsForBatch.policyGradNormSum
 			diagnostics.valueGradNormSum += diagnosticsForBatch.valueGradNormSum
 			diagnostics.updates += diagnosticsForBatch.updates
-			tr.params.Unlock()
+			tr.valueParams.Unlock()
+			tr.policyParams.Unlock()
 			updateCount++
 		}
 	}
@@ -388,7 +422,7 @@ func (tr *Trainer) collectRolloutsParallel(ctx context.Context, epoch int) ([]*R
 			defer func() { <-semaphore }()
 
 			rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, index)
-			rollout, err := collectTrajectory(ctx, tr.params, tr.envFactory, tr.settings.EpisodeLen, rng)
+			rollout, err := collectTrajectory(ctx, tr.policyParams, tr.valueParams, tr.envFactory, tr.settings.EpisodeLen, rng)
 			rollouts[index] = rollout
 			errs[index] = err
 		}(i)
@@ -415,7 +449,7 @@ func (tr *Trainer) collectRolloutsSequential(ctx context.Context, epoch int) ([]
 	rollouts := make([]*Rollout, tr.settings.RolloutSize)
 	for i := range tr.settings.RolloutSize {
 		rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, i)
-		rollout, err := collectTrajectoryFromEnv(ctx, tr.params, tr.persistentEnv, tr.settings.EpisodeLen, rng)
+		rollout, err := collectTrajectoryFromEnv(ctx, tr.policyParams, tr.valueParams, tr.persistentEnv, tr.settings.EpisodeLen, rng)
 		if err != nil {
 			return nil, err
 		}
@@ -469,7 +503,7 @@ func (tr *Trainer) collectRolloutsPool(ctx context.Context, epoch int) ([]*Rollo
 					return
 				}
 				rng := reinforce.WorkerRNG(tr.settings.Seed, epoch, i)
-				rollout, err := collectTrajectoryFromEnv(ctx, tr.params, env, tr.settings.EpisodeLen, rng)
+				rollout, err := collectTrajectoryFromEnv(ctx, tr.policyParams, tr.valueParams, env, tr.settings.EpisodeLen, rng)
 				if err != nil {
 					errs[i] = err
 					return
@@ -490,8 +524,22 @@ func (tr *Trainer) collectRolloutsPool(ctx context.Context, epoch int) ([]*Rollo
 
 // trainOnMinibatch replays every step in minibatch through the shared
 // TrainingNetwork sequentially, accumulating gradients (see
-// autograd.Graph.Backward), then applies one Adam step averaged over
-// len(minibatch).
+// autograd.Graph.Backward) in a single combined Forward/Backward pass
+// per step, then applies one Adam step averaged over len(minibatch).
+//
+// This used to take three such passes per step: one through a
+// policy-only graph and one through a value-only graph (just to measure
+// policyGradientNorm/valueGradientNorm separately), plus the real
+// combined pass. That was only necessary because the old network shared
+// one trunk between both heads, so a combined backward pass's gradient
+// at the trunk was an inseparable mix of both objectives. Now that
+// TrainingNetwork's PolicyActor and ValueActor are fully independent
+// networks (see its own doc comment), objectiveGradientNorm can read
+// each branch's exact contribution straight off the one combined pass's
+// already-accumulated gradients — mirroring
+// RecurrentTrainer.trainNetworkOnChunks, which solved the same problem
+// for the recurrent network the same way (see its doc comment at
+// pkg/ppo/recurrent_trainer.go).
 func (tr *Trainer) trainOnMinibatch(minibatch []trainingStep) epochDiagnostics {
 	var diagnostics epochDiagnostics
 	cfg := LossConfig{ClipEpsilon: tr.settings.ClipEpsilon, EntropyCoef: tr.settings.EntropyCoef, ValueCoef: tr.settings.ValueCoef}
@@ -499,36 +547,18 @@ func (tr *Trainer) trainOnMinibatch(minibatch []trainingStep) epochDiagnostics {
 		return diagnostics
 	}
 
-	tr.network.Actor.ZeroGrad()
+	tr.network.ZeroGrad()
 	for _, step := range minibatch {
-		copy(tr.network.Actor.Input.Val.Data, step.Observation.Values)
-		tr.network.Actor.SetActionMask(step.Mask)
-		tr.network.SetStep(step.Action, step.OldLogProb, step.Advantage, step.Return)
-		tr.network.PolicyGraph.Forward()
-		tr.network.PolicyGraph.Backward()
-	}
-	policyGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), len(minibatch))
-
-	tr.network.Actor.ZeroGrad()
-	for _, step := range minibatch {
-		copy(tr.network.Actor.Input.Val.Data, step.Observation.Values)
-		tr.network.Actor.SetActionMask(step.Mask)
-		tr.network.SetStep(step.Action, step.OldLogProb, step.Advantage, step.Return)
-		tr.network.ValueGraph.Forward()
-		tr.network.ValueGraph.Backward()
-	}
-	valueGradientNorm := objectiveGradientNorm(tr.network.Actor.Parameters(), len(minibatch))
-
-	tr.network.Actor.ZeroGrad()
-	for _, step := range minibatch {
-		copy(tr.network.Actor.Input.Val.Data, step.Observation.Values)
-		tr.network.Actor.SetActionMask(step.Mask)
+		tr.network.SetInput(step.Observation.Values, step.Mask)
 		tr.network.SetStep(step.Action, step.OldLogProb, step.Advantage, step.Return)
 
 		tr.network.Graph.Forward()
-		diagnostics.observeStep(tr.network.Actor.PolicyOutput.Val.Data, tr.network.Actor.ValueOutput.Val.Data[0], step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
+		diagnostics.observeStep(tr.network.PolicyActor.PolicyOutput.Val.Data, tr.network.ValueActor.ValueOutput.Val.Data[0], step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
 		tr.network.Graph.Backward()
 	}
+
+	policyGradientNorm := objectiveGradientNorm(tr.network.PolicyActor.Parameters(), len(minibatch))
+	valueGradientNorm := objectiveGradientNorm(tr.network.ValueActor.Parameters(), len(minibatch))
 
 	diagnostics.observeUpdate(tr.adam.GradientNorm(len(minibatch)), tr.adam.AppliedGradientNorm(len(minibatch)), policyGradientNorm, valueGradientNorm)
 	tr.adam.Step(len(minibatch))

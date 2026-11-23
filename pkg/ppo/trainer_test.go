@@ -96,12 +96,16 @@ func TestNewUsesProvidedInitialParams(t *testing.T) {
 	settings := smallTestSettings()
 
 	rng := rand.New(rand.NewPCG(99, 99))
-	initialParams := actorcritic.NewParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions, 2)
+	initialParams := &ActorCriticParams{
+		Policy: actorcritic.NewParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions, 2),
+		Value:  actorcritic.NewParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions, 2),
+	}
 
 	trainer, err := New(settings, snakeEnvFactory(settings.GridSize), initialParams)
 	require.NoError(t, err)
 
-	assert.Same(t, initialParams, trainer.Params(), "New must use the provided initialParams rather than reinitializing")
+	assert.Same(t, initialParams.Policy, trainer.Params().Policy, "New must use the provided initialParams.Policy rather than reinitializing")
+	assert.Same(t, initialParams.Value, trainer.Params().Value, "New must use the provided initialParams.Value rather than reinitializing")
 }
 
 // TestNewRejectsMismatchedInitialParams confirms a checkpoint saved for
@@ -111,9 +115,26 @@ func TestNewRejectsMismatchedInitialParams(t *testing.T) {
 	settings := smallTestSettings()
 
 	rng := rand.New(rand.NewPCG(1, 1))
-	mismatched := actorcritic.NewParams(rng, snakeenv.StateVectorSize(36), settings.HiddenSize, snakeenv.NumActions, 2)
+	mismatchedPolicy := actorcritic.NewParams(rng, snakeenv.StateVectorSize(36), settings.HiddenSize, snakeenv.NumActions, 2)
+	mismatchedValue := actorcritic.NewParams(rng, snakeenv.StateVectorSize(36), settings.HiddenSize, snakeenv.NumActions, 2)
 
-	_, err := New(settings, snakeEnvFactory(settings.GridSize), mismatched)
+	_, err := New(settings, snakeEnvFactory(settings.GridSize), &ActorCriticParams{Policy: mismatchedPolicy, Value: mismatchedValue})
+	assert.Error(t, err)
+}
+
+// TestNewRejectsPartialInitialParams confirms a half-populated
+// ActorCriticParams (one of Policy/Value nil, the other set) is
+// rejected rather than silently initializing the missing branch fresh —
+// see TrainingNetwork's doc comment for why Policy and Value must never
+// end up as the same *actorcritic.Params instance, which a caller might
+// otherwise be tempted to do to "fill in" a missing branch.
+func TestNewRejectsPartialInitialParams(t *testing.T) {
+	settings := smallTestSettings()
+
+	rng := rand.New(rand.NewPCG(2, 2))
+	policy := actorcritic.NewParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions, 2)
+
+	_, err := New(settings, snakeEnvFactory(settings.GridSize), &ActorCriticParams{Policy: policy})
 	assert.Error(t, err)
 }
 

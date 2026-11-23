@@ -27,9 +27,10 @@ func snakeEnvFactory(gridSize int) reinforce.EnvFactory {
 func TestCollectTrajectoryProducesFiniteLogProbsAndValues(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	gridSize := 4
-	params := actorcritic.NewParams(rng, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
+	policyParams := actorcritic.NewParams(rng, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
+	valueParams := actorcritic.NewParams(rng, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
 
-	rollout, err := collectTrajectory(context.Background(), params, snakeEnvFactory(gridSize), 10, rng)
+	rollout, err := collectTrajectory(context.Background(), policyParams, valueParams, snakeEnvFactory(gridSize), 10, rng)
 	require.NoError(t, err)
 
 	require.NotEmpty(t, rollout.Episode.Transitions)
@@ -51,8 +52,10 @@ func TestCollectTrajectoryIsDeterministicForAFixedSeed(t *testing.T) {
 	gridSize := 4
 	build := func() (*Rollout, error) {
 		rng := rand.New(rand.NewPCG(5, 6))
-		params := actorcritic.NewParams(rand.New(rand.NewPCG(5, 6)), snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
-		return collectTrajectory(context.Background(), params, snakeEnvFactory(gridSize), 10, rng)
+		paramsRNG := rand.New(rand.NewPCG(5, 6))
+		policyParams := actorcritic.NewParams(paramsRNG, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
+		valueParams := actorcritic.NewParams(paramsRNG, snakeenv.StateVectorSize(gridSize), 8, snakeenv.NumActions, 2)
+		return collectTrajectory(context.Background(), policyParams, valueParams, snakeEnvFactory(gridSize), 10, rng)
 	}
 
 	rolloutA, err := build()

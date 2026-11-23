@@ -19,11 +19,11 @@ const logProbEpsilon float32 = 1e-8
 
 // collectTrajectory runs one episode (up to episodeLen steps, ending
 // early if the environment reports Done) using an environment built by
-// envFactory and a fresh actorcritic.InferenceNetwork built over params,
-// both private to this call. rng drives both envFactory and action
-// sampling, via reinforce.SampleMaskedAction with a nil mask (reused
-// as-is: sampling a category from a probability vector has no
-// algorithm-specific behavior of its own). This can't use
+// envFactory and fresh actorcritic.InferenceNetworks built over
+// policyParams/valueParams, both private to this call. rng drives both
+// envFactory and action sampling, via reinforce.SampleMaskedAction with
+// a nil mask (reused as-is: sampling a category from a probability
+// vector has no algorithm-specific behavior of its own). This can't use
 // actorcritic.Actor.Act directly, unlike pkg/reinforce's
 // collectTrajectory: that API only returns a sampled action, not the
 // PolicyOutput/ValueOutput this function also needs to record
@@ -33,12 +33,12 @@ const logProbEpsilon float32 = 1e-8
 // step, the sampled action's log-probability and the value head's
 // estimate — both required by computeGAE and the PPO loss (see
 // gae.go, loss.go) — as a Rollout alongside the plain rl.Episode.
-func collectTrajectory(ctx context.Context, params *actorcritic.Params, envFactory reinforce.EnvFactory, episodeLen int, rng *rand.Rand) (*Rollout, error) {
+func collectTrajectory(ctx context.Context, policyParams, valueParams *actorcritic.Params, envFactory reinforce.EnvFactory, episodeLen int, rng *rand.Rand) (*Rollout, error) {
 	env, err := envFactory(rng)
 	if err != nil {
 		return nil, fmt.Errorf("ppo: creating environment: %w", err)
 	}
-	return collectTrajectoryFromEnv(ctx, params, env, episodeLen, rng)
+	return collectTrajectoryFromEnv(ctx, policyParams, valueParams, env, episodeLen, rng)
 }
 
 // collectTrajectoryFromEnv is collectTrajectory's shared core: it runs
@@ -48,10 +48,20 @@ func collectTrajectory(ctx context.Context, params *actorcritic.Params, envFacto
 // once per call) and Trainer.collectRolloutsSequential (which reuses
 // one long-lived, reinforce.PersistentEnvFactory-built env across many
 // calls — see docs/plans/08-context-and-long-lived-environments.md).
-func collectTrajectoryFromEnv(ctx context.Context, params *actorcritic.Params, env rl.Environment, episodeLen int, rng *rand.Rand) (*Rollout, error) {
-	net, err := actorcritic.NewInferenceNetwork(params)
+//
+// policyParams and valueParams are evaluated as two separate forward
+// passes (one InferenceNetwork each) rather than one combined pass,
+// since Trainer now trains them as fully independent networks (see
+// TrainingNetwork's own doc comment) — there is no single network left
+// whose one forward pass produces both outputs together.
+func collectTrajectoryFromEnv(ctx context.Context, policyParams, valueParams *actorcritic.Params, env rl.Environment, episodeLen int, rng *rand.Rand) (*Rollout, error) {
+	policyNet, err := actorcritic.NewInferenceNetwork(policyParams)
 	if err != nil {
-		return nil, fmt.Errorf("ppo: building inference network: %w", err)
+		return nil, fmt.Errorf("ppo: building policy inference network: %w", err)
+	}
+	valueNet, err := actorcritic.NewInferenceNetwork(valueParams)
+	if err != nil {
+		return nil, fmt.Errorf("ppo: building value inference network: %w", err)
 	}
 
 	observation, err := env.Reset(ctx)
@@ -64,20 +74,22 @@ func collectTrajectoryFromEnv(ctx context.Context, params *actorcritic.Params, e
 	values := make([]float32, 0, episodeLen)
 
 	for range episodeLen {
-		copy(net.Input.Val.Data, observation.Values)
-		net.Graph.Forward()
+		copy(policyNet.Input.Val.Data, observation.Values)
+		copy(valueNet.Input.Val.Data, observation.Values)
+		policyNet.Graph.Forward()
+		valueNet.Graph.Forward()
 
 		var mask []bool
 		if masker, ok := env.(rl.ActionMasker); ok {
 			mask = masker.ActionMask()
 		}
 
-		action, err := reinforce.SampleMaskedAction(net.PolicyOutput.Val, mask, rng)
+		action, err := reinforce.SampleMaskedAction(policyNet.PolicyOutput.Val, mask, rng)
 		if err != nil {
 			return nil, fmt.Errorf("ppo: sampling action: %w", err)
 		}
-		logProbs = append(logProbs, maskedActionLogProb(net.PolicyOutput.Val, mask, action))
-		values = append(values, net.ValueOutput.Val.Data[0])
+		logProbs = append(logProbs, maskedActionLogProb(policyNet.PolicyOutput.Val, mask, action))
+		values = append(values, valueNet.ValueOutput.Val.Data[0])
 
 		result, err := env.Step(ctx, action)
 		if err != nil {

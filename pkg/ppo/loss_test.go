@@ -76,18 +76,21 @@ func TestGradientCheckPPOLoss(t *testing.T) {
 	// TestGradientCheckReLU's doc comment in pkg/autograd for the same
 	// caveat) without indicating any actual bug.
 	rng := rand.New(rand.NewPCG(1, 4))
-	actorParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
+	policyParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
+	valueParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
 
-	net, err := NewTrainingNetwork(actorParams, LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5})
+	net, err := NewTrainingNetwork(policyParams, valueParams, LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5})
 	require.NoError(t, err)
 
-	net.Actor.Input.Val.FillRand(rng, -1, 1)
+	input := mat.New(4, 1)
+	input.FillRand(rng, -1, 1)
+	net.SetInput(input.Data, nil)
 	net.SetStep(rl.Action(1), -1.0, 0.7, 0.5)
 
 	net.Graph.Forward()
 	net.Graph.Backward()
 
-	for _, p := range net.Actor.Parameters() {
+	for _, p := range net.Parameters() {
 		assertMatricesClose(t, p.Grad, numericalGradient(p, net.Loss, net.Graph.Forward), gradCheckTolerance)
 	}
 }
@@ -100,13 +103,16 @@ func TestGradientCheckPPOLoss(t *testing.T) {
 // sampled action's index, making the expected value computable by hand.
 func TestBuildLossClipsRatioOutsideBounds(t *testing.T) {
 	rng := rand.New(rand.NewPCG(419, 421))
-	actorParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
+	policyParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
+	valueParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
 	clipEpsilon := float32(0.2)
 
-	net, err := NewTrainingNetwork(actorParams, LossConfig{ClipEpsilon: clipEpsilon, EntropyCoef: 0, ValueCoef: 0})
+	net, err := NewTrainingNetwork(policyParams, valueParams, LossConfig{ClipEpsilon: clipEpsilon, EntropyCoef: 0, ValueCoef: 0})
 	require.NoError(t, err)
 
-	net.Actor.Input.Val.FillRand(rng, -1, 1)
+	input := mat.New(4, 1)
+	input.FillRand(rng, -1, 1)
+	net.SetInput(input.Data, nil)
 	action := rl.Action(1)
 	advantage := float32(1.0)
 
@@ -115,7 +121,7 @@ func TestBuildLossClipsRatioOutsideBounds(t *testing.T) {
 	// it (SetStep must run before Forward populates PolicyOutput from
 	// this exact Input, so run Forward once beforehand to read it).
 	net.Graph.Forward()
-	currentLogProb := actionLogProb(net.Actor.PolicyOutput.Val, action)
+	currentLogProb := actionLogProb(net.PolicyActor.PolicyOutput.Val, action)
 
 	// Push oldLogProb far below the current log-probability, forcing
 	// ratio = exp(currentLogProb - oldLogProb) to be huge (well beyond
@@ -147,20 +153,23 @@ func TestBuildLossClipsRatioOutsideBounds(t *testing.T) {
 // term itself vanishes (min(0,0)=0), leaving only the value term.
 func TestBuildLossValueTermIsSquaredError(t *testing.T) {
 	rng := rand.New(rand.NewPCG(431, 433))
-	actorParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
+	policyParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
+	valueParams := actorcritic.NewParams(rng, 4, 5, 3, 2)
 	valueCoef := float32(2.0)
 
-	net, err := NewTrainingNetwork(actorParams, LossConfig{ClipEpsilon: 1.0, EntropyCoef: 0, ValueCoef: valueCoef})
+	net, err := NewTrainingNetwork(policyParams, valueParams, LossConfig{ClipEpsilon: 1.0, EntropyCoef: 0, ValueCoef: valueCoef})
 	require.NoError(t, err)
 
-	net.Actor.Input.Val.FillRand(rng, -1, 1)
+	input := mat.New(4, 1)
+	input.FillRand(rng, -1, 1)
+	net.SetInput(input.Data, nil)
 	action := rl.Action(0)
 
 	net.Graph.Forward()
-	value := net.Actor.ValueOutput.Val.Data[0]
+	value := net.ValueActor.ValueOutput.Val.Data[0]
 
 	returnTarget := value - 0.5 // a fixed, known difference from value
-	net.SetStep(action, actionLogProb(net.Actor.PolicyOutput.Val, action), 0 /* advantage */, returnTarget)
+	net.SetStep(action, actionLogProb(net.PolicyActor.PolicyOutput.Val, action), 0 /* advantage */, returnTarget)
 	net.Graph.Forward()
 
 	expected := valueCoef * 0.5 * 0.5

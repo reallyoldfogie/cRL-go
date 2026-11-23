@@ -8,9 +8,21 @@ import (
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/checkpoint"
+	"github.com/reallyoldfogie/cRL-go/pkg/ppo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newTestActorCriticParams builds a fresh ppo.ActorCriticParams with two
+// genuinely distinct policy/value *actorcritic.Params (see
+// ppo.TrainingNetwork's own doc comment for why they must never be the
+// same instance), consuming rng twice.
+func newTestActorCriticParams(rng *rand.Rand, inputSize, hiddenSize, outputSize, numHiddenLayers int) *ppo.ActorCriticParams {
+	return &ppo.ActorCriticParams{
+		Policy: actorcritic.NewParams(rng, inputSize, hiddenSize, outputSize, numHiddenLayers),
+		Value:  actorcritic.NewParams(rng, inputSize, hiddenSize, outputSize, numHiddenLayers),
+	}
+}
 
 func TestResumeFromCheckpointDirStartsFreshWithNoDirSet(t *testing.T) {
 	resume, err := resumeFromCheckpointDir("", "snake:4")
@@ -39,7 +51,7 @@ func TestResumeFromCheckpointDirContinuesExactEpochAndMetadata(t *testing.T) {
 	environmentID := "snake:4"
 
 	rng := rand.New(rand.NewPCG(1, 2))
-	params := actorcritic.NewParams(rng, 8, 4, 3, 2)
+	params := newTestActorCriticParams(rng, 8, 4, 3, 2)
 
 	savedMetadata := checkpoint.Metadata{Epoch: 41, BestReturn: 12.5, TotalUpdates: 328}
 	require.NoError(t, saveCheckpointToDir(dir, params, environmentID, savedMetadata.Epoch, savedMetadata.BestReturn, savedMetadata.TotalUpdates))
@@ -48,7 +60,8 @@ func TestResumeFromCheckpointDirContinuesExactEpochAndMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, resume.Params)
-	assert.Equal(t, params.Hidden[0].W.Data, resume.Params.Hidden[0].W.Data, "resuming must load the exact saved weights")
+	assert.Equal(t, params.Policy.Hidden[0].W.Data, resume.Params.Policy.Hidden[0].W.Data, "resuming must load the exact saved policy weights")
+	assert.Equal(t, params.Value.Hidden[0].W.Data, resume.Params.Value.Hidden[0].W.Data, "resuming must load the exact saved value weights")
 	assert.Equal(t, savedMetadata.Epoch+1, resume.StartEpoch, "resuming must continue from the epoch *after* the one the checkpoint recorded")
 	assert.Equal(t, savedMetadata.BestReturn, resume.BestReturn)
 	assert.Equal(t, savedMetadata.TotalUpdates, resume.TotalUpdates)
@@ -61,7 +74,7 @@ func TestResumeFromCheckpointDirPicksLatestAcrossMultipleSaves(t *testing.T) {
 	dir := t.TempDir()
 	environmentID := "snake:4"
 	rng := rand.New(rand.NewPCG(3, 4))
-	params := actorcritic.NewParams(rng, 8, 4, 3, 2)
+	params := newTestActorCriticParams(rng, 8, 4, 3, 2)
 
 	require.NoError(t, saveCheckpointToDir(dir, params, environmentID, 10, 1.0, 100))
 	require.NoError(t, saveCheckpointToDir(dir, params, environmentID, 50, 5.0, 500))
@@ -77,7 +90,7 @@ func TestResumeFromCheckpointDirPicksLatestAcrossMultipleSaves(t *testing.T) {
 func TestResumeFromCheckpointDirRejectsMismatchedEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	rng := rand.New(rand.NewPCG(5, 6))
-	params := actorcritic.NewParams(rng, 8, 4, 3, 2)
+	params := newTestActorCriticParams(rng, 8, 4, 3, 2)
 
 	require.NoError(t, saveCheckpointToDir(dir, params, "snake:4", 1, 0, 1))
 
@@ -88,10 +101,12 @@ func TestResumeFromCheckpointDirRejectsMismatchedEnvironment(t *testing.T) {
 func TestSaveCheckpointToDirCreatesDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist-yet")
 	rng := rand.New(rand.NewPCG(7, 8))
-	params := actorcritic.NewParams(rng, 4, 4, 2, 2)
+	params := newTestActorCriticParams(rng, 4, 4, 2, 2)
 
 	require.NoError(t, saveCheckpointToDir(dir, params, "snake:4", 0, 0, 1))
 
-	_, err := checkpoint.Latest(dir, checkpointPrefix)
+	_, err := checkpoint.Latest(dir, policyCheckpointPrefix)
+	assert.NoError(t, err)
+	_, err = checkpoint.Latest(dir, valueCheckpointPrefix)
 	assert.NoError(t, err)
 }

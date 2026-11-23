@@ -36,8 +36,8 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("train-ppo", flag.ContinueOnError)
 	overrides := config.RegisterFlags(fs)
 	envName := fs.String("env", "snake", "environment to train against: snake or gridworld")
-	checkpointIn := fs.String("checkpoint-in", "", "path to a checkpoint (see -checkpoint-out) to resume training from, instead of a fresh policy (optional)")
-	checkpointOut := fs.String("checkpoint-out", "", "path to save the trained actor-critic weights to after training completes (optional)")
+	checkpointIn := fs.String("checkpoint-in", "", "base path to a checkpoint pair (see -checkpoint-out) to resume training from, instead of a fresh policy (optional); the policy/value branches are read from <path>.policy.json/<path>.value.json")
+	checkpointOut := fs.String("checkpoint-out", "", "base path to save the trained actor-critic weights to after training completes (optional); the policy/value branches are written to <path>.policy.json/<path>.value.json")
 	checkpointDir := fs.String("checkpoint-dir", "", "directory to auto-resume the latest checkpoint from, and periodically save numbered checkpoints into (optional; independent of -checkpoint-in/-checkpoint-out)")
 	checkpointInterval := fs.Int("checkpoint-interval", 50, "save a checkpoint to -checkpoint-dir every N epochs (only used if -checkpoint-dir is set)")
 	metricsOut := fs.String("metrics-out", "", "path to write one CSV row of per-epoch metrics to (optional; see docs/plans/15-agent-and-training-visualization.md)")
@@ -147,30 +147,49 @@ func run(args []string) error {
 
 	if *checkpointOut != "" {
 		metadata := checkpoint.Metadata{Epoch: settings.Epochs - 1, BestReturn: bestReturn, TotalUpdates: totalUpdates}
-		if err := actorcritic.SaveFile(*checkpointOut, trainer.Params(), environmentID, metadata); err != nil {
+		params := trainer.Params()
+		if err := actorcritic.SaveFile(policyCheckpointOutPath(*checkpointOut), params.Policy, environmentID, metadata); err != nil {
+			return fmt.Errorf("saving checkpoint: %w", err)
+		}
+		if err := actorcritic.SaveFile(valueCheckpointOutPath(*checkpointOut), params.Value, environmentID, metadata); err != nil {
 			return fmt.Errorf("saving checkpoint: %w", err)
 		}
 	}
 	return nil
 }
 
-// loadInitialParams loads the checkpoint at checkpointPath if one was
-// given, returning nil (meaning "initialize fresh") if checkpointPath is
-// empty. expectedEnvironmentID is validated against the checkpoint's own
-// saved environment ID (see actorcritic.Load). Its metadata is
-// discarded: -checkpoint-in is the "manual single-file" resume mode,
-// which has always restarted epoch numbering from 0; -checkpoint-dir
-// (see checkpoints.go) is the mode that continues it.
-func loadInitialParams(checkpointPath, expectedEnvironmentID string) (*actorcritic.Params, error) {
+// policyCheckpointOutPath and valueCheckpointOutPath derive the two
+// sibling file paths -checkpoint-in/-checkpoint-out's single base path
+// now reads/writes, mirroring checkpoints.go's -checkpoint-dir
+// policy/value split for this command's "manual single-file" resume
+// mode (see loadInitialParams's own doc comment for why that mode is
+// otherwise distinct from -checkpoint-dir).
+func policyCheckpointOutPath(base string) string { return base + ".policy.json" }
+func valueCheckpointOutPath(base string) string  { return base + ".value.json" }
+
+// loadInitialParams loads the checkpoint pair at
+// policyCheckpointOutPath(checkpointPath)/valueCheckpointOutPath(checkpointPath)
+// if checkpointPath was given, returning nil (meaning "initialize
+// fresh") if checkpointPath is empty. expectedEnvironmentID is
+// validated against each checkpoint's own saved environment ID (see
+// actorcritic.Load). Their metadata is discarded: -checkpoint-in is the
+// "manual single-file" resume mode, which has always restarted epoch
+// numbering from 0; -checkpoint-dir (see checkpoints.go) is the mode
+// that continues it.
+func loadInitialParams(checkpointPath, expectedEnvironmentID string) (*ppo.ActorCriticParams, error) {
 	if checkpointPath == "" {
 		return nil, nil
 	}
 
-	params, _, err := actorcritic.LoadFile(checkpointPath, expectedEnvironmentID)
+	policy, _, err := actorcritic.LoadFile(policyCheckpointOutPath(checkpointPath), expectedEnvironmentID)
 	if err != nil {
 		return nil, fmt.Errorf("loading checkpoint: %w", err)
 	}
-	return params, nil
+	value, _, err := actorcritic.LoadFile(valueCheckpointOutPath(checkpointPath), expectedEnvironmentID)
+	if err != nil {
+		return nil, fmt.Errorf("loading checkpoint: %w", err)
+	}
+	return &ppo.ActorCriticParams{Policy: policy, Value: value}, nil
 }
 
 // newEnvFactory returns the reinforce.EnvFactory for the environment

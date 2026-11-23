@@ -9,7 +9,7 @@
 // primitive-action decision — both are categorical action selection
 // scored with GAE advantages and the PPO clip objective — so this
 // package composes pkg/ppo/pkg/actorcritic directly (one
-// ppo.TrainingNetwork/actorcritic.Adam pair for the meta-controller,
+// ppo.SharedTrunkTrainingNetwork/actorcritic.Adam pair for the meta-controller,
 // one more per Subgoal) rather than reimplementing any loss or GAE
 // math of its own.
 package hierarchical
