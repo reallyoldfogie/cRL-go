@@ -3,16 +3,19 @@
 // activation functions, and the REINFORCE policy-gradient loss) needed by
 // the rest of this module.
 //
-// This is a deliberately minimal, dependency-free reimplementation of
-// mat.c/mat.h from github.com/harshbhatt7585/cRL. See docs/04-numerical-stability-notes.md
-// for why specific operations (softmax, the REINFORCE loss) are implemented
-// the way they are.
+// This is a deliberately minimal reimplementation of mat.c/mat.h from
+// github.com/harshbhatt7585/cRL, with one dependency (github.com/chewxy/math32,
+// a float32-native math library — see its use in Sigmoid/Tanh/Exp/Log/Softmax
+// below) in place of Go's float64-only standard math package. See
+// docs/04-numerical-stability-notes.md for why specific operations (softmax,
+// the REINFORCE loss) are implemented the way they are.
 package mat
 
 import (
 	"fmt"
-	"math"
 	"math/rand/v2"
+
+	"github.com/chewxy/math32"
 )
 
 // probEpsilon is the smallest probability value used when a probability is
@@ -283,7 +286,7 @@ func (dst *Matrix) Softmax(in *Matrix) error {
 
 	var sum float32
 	for i, v := range in.Data {
-		e := float32(math.Exp(float64(v - maxValue)))
+		e := math32.Exp(v - maxValue)
 		dst.Data[i] = e
 		sum += e
 	}
@@ -299,7 +302,7 @@ func (dst *Matrix) Sigmoid(in *Matrix) error {
 	}
 
 	for i, v := range in.Data {
-		dst.Data[i] = float32(1.0 / (1.0 + math.Exp(-float64(v))))
+		dst.Data[i] = 1.0 / (1.0 + math32.Exp(-v))
 	}
 	return nil
 }
@@ -311,7 +314,7 @@ func (dst *Matrix) Tanh(in *Matrix) error {
 	}
 
 	for i, v := range in.Data {
-		dst.Data[i] = float32(math.Tanh(float64(v)))
+		dst.Data[i] = math32.Tanh(v)
 	}
 	return nil
 }
@@ -323,7 +326,7 @@ func (dst *Matrix) Exp(in *Matrix) error {
 	}
 
 	for i, v := range in.Data {
-		dst.Data[i] = float32(math.Exp(float64(v)))
+		dst.Data[i] = math32.Exp(v)
 	}
 	return nil
 }
@@ -338,7 +341,7 @@ func (dst *Matrix) Log(in *Matrix) error {
 
 	for i, v := range in.Data {
 		clamped := max(v, probEpsilon)
-		dst.Data[i] = float32(math.Log(float64(clamped)))
+		dst.Data[i] = math32.Log(clamped)
 	}
 	return nil
 }
@@ -357,7 +360,7 @@ func (dst *Matrix) ReinforceLoss(probs, advantages *Matrix) error {
 
 	for i, p := range probs.Data {
 		clamped := max(p, probEpsilon)
-		dst.Data[i] = float32(-math.Log(float64(clamped))) * advantages.Data[i]
+		dst.Data[i] = -math32.Log(clamped) * advantages.Data[i]
 	}
 	return nil
 }

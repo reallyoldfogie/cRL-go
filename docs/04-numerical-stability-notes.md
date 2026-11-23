@@ -7,7 +7,7 @@ Floating-point numbers can't represent every real number exactly, and operations
 `Softmax` in `pkg/mat/mat.go` computes, for each element `x_i`:
 
 ```go
-e := math.Exp(float64(v - maxValue))
+e := math32.Exp(v - maxValue)
 ```
 
 rather than the textbook `exp(x_i)` directly. Here's why: `float32` can represent values up to roughly `3.4 * 10^38`, but `exp(x)` grows so fast that even a fairly ordinary-looking input like `x = 100` gives `exp(100) ≈ 2.7 * 10^43` — already larger than the largest representable `float32`, which "overflows" to `+Inf`. Once any single value overflows, the following division (`e / sum`) produces `NaN` (`Inf / Inf`), poisoning the entire softmax output and, from there, every downstream computation.
@@ -57,7 +57,7 @@ This preserves the original algorithm's behavior for the (overwhelmingly common)
 
 Every numeric type in `pkg/mat` is `float32`, matching the original C implementation's `f32` (`float`) throughout. Go and C both implement IEEE 754 binary32 arithmetic, so a given sequence of `float32` operations produces bit-for-bit identical results in both languages *if* the exact same operations are performed in the exact same order. This port deliberately preserves the original operation order in every numerically meaningful spot (softmax, the REINFORCE loss/gradient, the matmul accumulation order) for this reason, even though exact byte-for-byte parity with the C binary was explicitly not a goal of this port (see `05-porting-notes.md`) — the two implementations are structured differently enough (e.g. a different random number generator, a restructured graph-building algorithm) that bit-for-bit parity was never realistically achievable end-to-end, but preserving float32 arithmetic and operation order keeps this port numerically faithful in spirit.
 
-One departure: `math.Exp`/`math.Log` in Go's standard library operate on `float64`, so `pkg/mat` converts to `float64`, calls the standard library function, and converts back to `float32` (Go's standard library has no built-in `float32` exp/log). This is, if anything, slightly *more* precise per individual call than C's native `expf`/`logf` (which compute directly in lower precision), not less.
+One departure: Go's standard library has no built-in `float32` exp/log/tanh, so `pkg/mat` used to convert to `float64`, call the standard library function, and convert back to `float32`. That round-trip was, if anything, slightly *more* precise per individual call than C's native `expf`/`logf` (which compute directly in lower precision), not less — but it also meant every activation call paid for a `float64` transcendental function just to throw away the extra precision immediately afterward. `pkg/mat` now uses `github.com/chewxy/math32`, a `float32`-native reimplementation of the same algorithms (not a lossy fast-math approximation), so this computes directly in `float32` like C's `expf`/`logf` would, at the same first-order precision, without the round-trip's overhead.
 
 ## Adam's division-by-near-zero guard
 
