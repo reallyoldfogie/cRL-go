@@ -78,6 +78,45 @@ func BenchmarkRecurrentChunkTraining(b *testing.B) {
 	}
 }
 
+// BenchmarkRecurrentChunkTrainingProductionSize is
+// BenchmarkRecurrentChunkTraining's sweep, re-run at 256-wide/3-deep
+// (current real training size) instead of configs/config.json's
+// shipped 128/2, single core (no update-worker split — see
+// BenchmarkRecurrentChunkTrainingFullWorkerSplit for that), to see
+// whether a bigger batch still helps once the network itself makes each
+// chunk's forward/backward far more expensive.
+//
+//	go test ./pkg/ppo/ -run '^$' -bench BenchmarkRecurrentChunkTrainingProductionSize -benchtime=3x
+func BenchmarkRecurrentChunkTrainingProductionSize(b *testing.B) {
+	const (
+		gridSize        = 36
+		hiddenSize      = 256
+		numHiddenLayers = 3
+		episodeLen      = 32
+		chunkLen        = 16
+		numChunks       = 64
+	)
+
+	rng := rand.New(rand.NewPCG(23, 29))
+	params := actorcritic.NewRecurrentParams(rng, snakeenv.StateVectorSize(gridSize), hiddenSize, snakeenv.NumActions, numHiddenLayers)
+	chunks := benchmarkRecurrentChunks(b, params, gridSize, episodeLen, chunkLen, numChunks)
+	cfg := LossConfig{ClipEpsilon: 0.2, EntropyCoef: 0.01, ValueCoef: 0.5}
+
+	for _, batchSize := range []int{1, 2, 4, 8, 16, 32, 64} {
+		b.Run(fmt.Sprintf("batch=%d", batchSize), func(b *testing.B) {
+			network, err := NewRecurrentTrainingNetwork(params, chunkLen, batchSize, cfg)
+			if err != nil {
+				b.Fatalf("building network: %v", err)
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				trainNetworkOnChunks(network, chunks, cfg)
+			}
+		})
+	}
+}
+
 // newUpdateReplicasForBench mirrors newUpdateReplicas exactly, except
 // batchSize is supplied directly instead of being derived from settings
 // via maxUpdateBatchSize — letting BenchmarkRecurrentChunkTrainingFullWorkerSplit
