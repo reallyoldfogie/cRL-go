@@ -256,29 +256,21 @@ func newRecurrentTrainer(settings config.Settings, env rl.Environment, initRNG *
 	}, nil
 }
 
-// updateWorkerReservedCPUs is how many of runtime.NumCPU()'s cores
-// updateWorkerCount deliberately leaves unclaimed. Found live, 2026-11-23
-// (mc-rsi-trainer, a 6-core host): claiming every core for the update
-// phase left nothing for the live Minecraft server, Grafana, Prometheus
-// and Docker sharing the same box - load average roughly double the
-// core count, 13%+ iowait and the process's own memory partly swapped
-// out, none of which showed up as a correctness problem, only as
-// contention this package has no way to see from inside itself. This
-// package still can't know what else shares its host, so it reserves a
-// fixed, modest amount rather than trying to detect it - the operator is
-// in a far better position to size this per-host than any heuristic
-// here would be.
-const updateWorkerReservedCPUs = 2
-
 // updateWorkerCount is how many RecurrentTrainingNetwork instances
 // (tr.network plus tr.updateReplicas) trainOnChunkMinibatch splits a
 // minibatch's chunks across - runtime.NumCPU() minus
-// updateWorkerReservedCPUs, capped at settings.MinibatchSize since a
-// worker with no chunk ever assigned to it would just be wasted memory,
-// and floored at 1 so a small-core host (or MinibatchSize==1) still
-// works exactly as before either of these existed.
+// settings.UpdateReservedCPUs (see that field's own doc comment for why
+// this is operator-configured rather than a fixed constant: this package
+// has no way to detect what else shares its host), capped at
+// settings.MinibatchSize since a worker with no chunk ever assigned to
+// it would just be wasted memory, and floored at 1 so a small-core host
+// (or MinibatchSize==1, or an UpdateReservedCPUs close to NumCPU())
+// still works. Settings.Validate already rejects UpdateReservedCPUs < 1
+// before a trainer is ever built, but this floors its own result too,
+// defensively, rather than trusting every caller to have validated
+// first.
 func updateWorkerCount(settings config.Settings) int {
-	n := runtime.NumCPU() - updateWorkerReservedCPUs
+	n := runtime.NumCPU() - settings.UpdateReservedCPUs
 	if n > settings.MinibatchSize {
 		n = settings.MinibatchSize
 	}

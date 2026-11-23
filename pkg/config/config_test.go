@@ -87,6 +87,22 @@ func TestValidateRejectsNonPositiveMinibatchSize(t *testing.T) {
 	assert.Error(t, settings.Validate())
 }
 
+func TestValidateRejectsZeroUpdateReservedCPUs(t *testing.T) {
+	settings := Default()
+	settings.UpdateReservedCPUs = 0
+	assert.Error(t, settings.Validate())
+}
+
+func TestValidateRejectsNegativeUpdateReservedCPUs(t *testing.T) {
+	settings := Default()
+	settings.UpdateReservedCPUs = -1
+	assert.Error(t, settings.Validate())
+}
+
+func TestDefaultUpdateReservedCPUsIsTwo(t *testing.T) {
+	assert.Equal(t, 2, Default().UpdateReservedCPUs)
+}
+
 func TestApplyOnlyOverridesExplicitlyPassedFlags(t *testing.T) {
 	settings := Default()
 

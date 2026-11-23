@@ -86,6 +86,20 @@ type Settings struct {
 	// the non-recurrent Trainer does. MinibatchSize/PPOEpochs count
 	// chunks, not individual steps, once this is set.
 	RecurrentChunkLen int `json:"recurrent_chunk_len"`
+
+	// UpdateReservedCPUs is how many of runtime.NumCPU()'s cores
+	// RecurrentTrainer's parallel update phase (see
+	// pkg/ppo.updateWorkerCount) deliberately leaves unclaimed, so it
+	// doesn't compete for every core with whatever else shares the host
+	// (found live, 2026-11-23, mc-rsi-trainer: a live Minecraft server,
+	// Grafana, Prometheus and Docker all sharing one 6-core box with the
+	// trainer - load average roughly double the core count, sustained
+	// iowait and swap once the update phase started claiming every
+	// core). This package has no way to detect what else is running on
+	// its host, so this is an operator-set reservation, not a heuristic.
+	// Enforced minimum of 1 (see Validate) - 0 would silently undo the
+	// whole point of this field. Defaults to 2.
+	UpdateReservedCPUs int `json:"update_reserved_cpus"`
 }
 
 // Default returns the out-of-the-box hyperparameters, matching the
@@ -93,22 +107,23 @@ type Settings struct {
 // where noted in docs/05-porting-notes.md.
 func Default() Settings {
 	return Settings{
-		Epochs:        2000,
-		RolloutSize:   64,
-		EpisodeLen:    100,
-		Gamma:         0.99,
-		LearningRate:  0.05,
-		GridSize:      36,
-		HiddenSize:    128,
-		Seed:          42,
-		Workers:       runtime.NumCPU(),
-		ClipEpsilon:   0.2,
-		EntropyCoef:   0.01,
-		ValueCoef:     0.5,
-		GAELambda:     0.95,
-		PPOEpochs:     4,
-		MinibatchSize: 64,
-		MaxGradNorm:   0.5,
+		Epochs:             2000,
+		RolloutSize:        64,
+		EpisodeLen:         100,
+		Gamma:              0.99,
+		LearningRate:       0.05,
+		GridSize:           36,
+		HiddenSize:         128,
+		Seed:               42,
+		Workers:            runtime.NumCPU(),
+		ClipEpsilon:        0.2,
+		EntropyCoef:        0.01,
+		ValueCoef:          0.5,
+		GAELambda:          0.95,
+		PPOEpochs:          4,
+		MinibatchSize:      64,
+		MaxGradNorm:        0.5,
+		UpdateReservedCPUs: 2,
 	}
 }
 
@@ -173,6 +188,9 @@ func (s Settings) Validate() error {
 	}
 	if s.RecurrentChunkLen < 0 {
 		return fmt.Errorf("config: recurrent_chunk_len must not be negative, got %d", s.RecurrentChunkLen)
+	}
+	if s.UpdateReservedCPUs < 1 {
+		return fmt.Errorf("config: update_reserved_cpus must be at least 1, got %d", s.UpdateReservedCPUs)
 	}
 	return nil
 }

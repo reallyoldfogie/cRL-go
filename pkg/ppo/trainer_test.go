@@ -18,21 +18,22 @@ import (
 
 func smallTestSettings() config.Settings {
 	return config.Settings{
-		Epochs:        3,
-		RolloutSize:   4,
-		EpisodeLen:    5,
-		Gamma:         0.99,
-		LearningRate:  0.01,
-		GridSize:      4, // 2x2 grid
-		HiddenSize:    8,
-		Seed:          1,
-		Workers:       2,
-		ClipEpsilon:   0.2,
-		EntropyCoef:   0.01,
-		ValueCoef:     0.5,
-		GAELambda:     0.95,
-		PPOEpochs:     2,
-		MinibatchSize: 8,
+		Epochs:             3,
+		RolloutSize:        4,
+		EpisodeLen:         5,
+		Gamma:              0.99,
+		LearningRate:       0.01,
+		GridSize:           4, // 2x2 grid
+		HiddenSize:         8,
+		Seed:               1,
+		Workers:            2,
+		ClipEpsilon:        0.2,
+		EntropyCoef:        0.01,
+		ValueCoef:          0.5,
+		GAELambda:          0.95,
+		PPOEpochs:          2,
+		MinibatchSize:      8,
+		UpdateReservedCPUs: 2,
 	}
 }
 
@@ -146,21 +147,22 @@ func TestTrainingImprovesAverageReturn(t *testing.T) {
 	}
 
 	settings := config.Settings{
-		Epochs:        150,
-		RolloutSize:   32,
-		EpisodeLen:    10,
-		Gamma:         0.9,
-		LearningRate:  0.01,
-		GridSize:      4,
-		HiddenSize:    16,
-		Seed:          42,
-		Workers:       8,
-		ClipEpsilon:   0.2,
-		EntropyCoef:   0.01,
-		ValueCoef:     0.5,
-		GAELambda:     0.95,
-		PPOEpochs:     4,
-		MinibatchSize: 32,
+		Epochs:             150,
+		RolloutSize:        32,
+		EpisodeLen:         10,
+		Gamma:              0.9,
+		LearningRate:       0.01,
+		GridSize:           4,
+		HiddenSize:         16,
+		Seed:               42,
+		Workers:            8,
+		ClipEpsilon:        0.2,
+		EntropyCoef:        0.01,
+		ValueCoef:          0.5,
+		GAELambda:          0.95,
+		PPOEpochs:          4,
+		MinibatchSize:      32,
+		UpdateReservedCPUs: 2,
 	}
 
 	trainer, err := New(settings, snakeEnvFactory(settings.GridSize), nil)

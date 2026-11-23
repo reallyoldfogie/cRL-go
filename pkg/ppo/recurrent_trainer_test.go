@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"testing"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
@@ -74,6 +75,44 @@ func TestNewRecurrentUsesProvidedInitialParams(t *testing.T) {
 	trainer, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), initialParams)
 	require.NoError(t, err)
 	assert.Same(t, initialParams, trainer.Params())
+}
+
+// TestUpdateWorkerCountRespectsReservedCPUs confirms updateWorkerCount
+// actually reads settings.UpdateReservedCPUs rather than a fixed amount
+// (found live, 2026-11-23: a 6-core host sharing the box with a live
+// Minecraft server, Grafana, Prometheus and Docker needed this
+// operator-tunable, not hardcoded - see that field's own doc comment).
+func TestUpdateWorkerCountRespectsReservedCPUs(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+	settings.MinibatchSize = 1000 // large enough to never be the binding cap in this test
+
+	settings.UpdateReservedCPUs = 1
+	assert.Equal(t, max(1, runtime.NumCPU()-1), updateWorkerCount(settings))
+
+	settings.UpdateReservedCPUs = 2
+	assert.Equal(t, max(1, runtime.NumCPU()-2), updateWorkerCount(settings))
+}
+
+// TestUpdateWorkerCountFloorsAtOneWhenReservedCPUsExceedsNumCPU confirms
+// an operator setting UpdateReservedCPUs close to or above the host's
+// own core count still leaves exactly one worker, rather than zero or
+// negative - the single-worker, no-replicas path RunEpoch already
+// predates this feature must still work.
+func TestUpdateWorkerCountFloorsAtOneWhenReservedCPUsExceedsNumCPU(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+	settings.MinibatchSize = 1000
+	settings.UpdateReservedCPUs = runtime.NumCPU() + 10
+	assert.Equal(t, 1, updateWorkerCount(settings))
+}
+
+// TestUpdateWorkerCountCapsAtMinibatchSize confirms the pre-existing
+// MinibatchSize cap still applies on top of the reservation - a worker
+// with no chunk ever assigned to it would just be wasted memory.
+func TestUpdateWorkerCountCapsAtMinibatchSize(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+	settings.UpdateReservedCPUs = 1
+	settings.MinibatchSize = 1
+	assert.Equal(t, 1, updateWorkerCount(settings))
 }
 
 // TestRecurrentChunkReplayMatchesCollectionOutputs proves the end-to-end
