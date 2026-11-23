@@ -84,8 +84,14 @@ func TestSoftmaxSumsToOneAndStaysFinite(t *testing.T) {
 	}
 
 	for _, in := range inputs {
-		inMat := &Matrix{Rows: 1, Cols: len(in), Data: append([]float32(nil), in...)}
-		out := New(1, len(in))
+		// Softmax operates per column (one distribution per column, over
+		// its rows — see its own doc comment), matching how every real
+		// caller shapes a probability vector as (outputSize, 1): one row
+		// per action, a single column. A (1, N) row shape would instead
+		// be N independent one-element columns, each trivially "softmax
+		// to 1" — not what this test means to exercise.
+		inMat := &Matrix{Rows: len(in), Cols: 1, Data: append([]float32(nil), in...)}
+		out := New(len(in), 1)
 		require.NoError(t, out.Softmax(inMat))
 
 		var sum float32
@@ -172,9 +178,12 @@ func TestTanhAndTanhAddGrad(t *testing.T) {
 }
 
 func TestSoftmaxAddGrad(t *testing.T) {
-	softmaxOut := &Matrix{Rows: 1, Cols: 2, Data: []float32{0.25, 0.75}}
-	grad := &Matrix{Rows: 1, Cols: 2, Data: []float32{1, 0}}
-	dst := New(1, 2)
+	// (outputSize, 1), not (1, outputSize) — see
+	// TestSoftmaxSumsToOneAndStaysFinite's own comment on why orientation
+	// matters now that Softmax is per-column.
+	softmaxOut := &Matrix{Rows: 2, Cols: 1, Data: []float32{0.25, 0.75}}
+	grad := &Matrix{Rows: 2, Cols: 1, Data: []float32{1, 0}}
+	dst := New(2, 1)
 
 	require.NoError(t, dst.SoftmaxAddGrad(softmaxOut, grad))
 

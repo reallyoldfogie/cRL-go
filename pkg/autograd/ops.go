@@ -132,6 +132,39 @@ func (addOp) Backward(v *Var) {
 	}
 }
 
+// addBiasOp broadcasts a (Rows, 1) bias across every column of a
+// (Rows, Cols) input: out = in + bias. Unlike addOp (which requires
+// identical shapes on both sides via sameShape), this lets a
+// per-feature bias apply uniformly across a batch of samples stacked as
+// columns — see mat.Matrix.AddBias.
+type addBiasOp struct{}
+
+func (addBiasOp) NumInputs() int { return 2 }
+
+func (addBiasOp) Shape(inputs ...*Var) (int, int, bool) {
+	in, bias := inputs[0], inputs[1]
+	if in == nil || bias == nil || bias.Val.Rows != in.Val.Rows || bias.Val.Cols != 1 {
+		return 0, 0, false
+	}
+	return in.Val.Rows, in.Val.Cols, true
+}
+
+func (addBiasOp) Forward(v *Var) {
+	_ = v.Val.AddBias(v.Inputs[0].Val, v.Inputs[1].Val)
+}
+
+func (addBiasOp) Backward(v *Var) {
+	in, bias := v.Inputs[0], v.Inputs[1]
+	if requiresGrad(in) {
+		// d(in+bias)/d(in) is 1 everywhere: the same pass-through
+		// accumulation as addOp's own "a" operand.
+		_ = in.Grad.Add(in.Grad, v.Grad)
+	}
+	if requiresGrad(bias) {
+		_ = bias.Grad.BiasAddGrad(v.Grad)
+	}
+}
+
 // subOp is elementwise subtraction.
 type subOp struct{}
 
@@ -170,6 +203,40 @@ func (mulOp) Backward(v *Var) {
 	}
 	if requiresGrad(b) {
 		_ = b.Grad.MulAddGrad(a.Val, v.Grad)
+	}
+}
+
+// mulBroadcastColsOp broadcasts a (1, Cols) row across every row of a
+// (Rows, Cols) matrix: out = a * row, elementwise per column. Used by
+// PPO's value loss to broadcast one scalar loss per batch column into
+// the one-hot row that column's sampled action occupies, which
+// matMulOp cannot express once Cols > 1 (its shared contraction
+// dimension requires both operands' relevant dimensions to match
+// exactly, collapsing to this exact broadcast only when Cols == 1) —
+// see mat.Matrix.MulBroadcastCols.
+type mulBroadcastColsOp struct{}
+
+func (mulBroadcastColsOp) NumInputs() int { return 2 }
+
+func (mulBroadcastColsOp) Shape(inputs ...*Var) (int, int, bool) {
+	a, row := inputs[0], inputs[1]
+	if a == nil || row == nil || row.Val.Rows != 1 || row.Val.Cols != a.Val.Cols {
+		return 0, 0, false
+	}
+	return a.Val.Rows, a.Val.Cols, true
+}
+
+func (mulBroadcastColsOp) Forward(v *Var) {
+	_ = v.Val.MulBroadcastCols(v.Inputs[0].Val, v.Inputs[1].Val)
+}
+
+func (mulBroadcastColsOp) Backward(v *Var) {
+	a, row := v.Inputs[0], v.Inputs[1]
+	if requiresGrad(a) {
+		_ = a.Grad.MulBroadcastColsAddGradA(row.Val, v.Grad)
+	}
+	if requiresGrad(row) {
+		_ = row.Grad.MulBroadcastColsAddGradRow(a.Val, v.Grad)
 	}
 }
 
@@ -358,6 +425,13 @@ func Add(a, b *Var) (*Var, error) {
 	return newNode(addOp{}, a, b)
 }
 
+// AddBias returns a new Var computing in + bias, broadcasting bias
+// (which must be (in.Rows, 1)) across every one of in's columns — see
+// mat.Matrix.AddBias.
+func AddBias(in, bias *Var) (*Var, error) {
+	return newNode(addBiasOp{}, in, bias)
+}
+
 // Sub returns a new Var computing a - b elementwise.
 func Sub(a, b *Var) (*Var, error) {
 	return newNode(subOp{}, a, b)
@@ -367,6 +441,13 @@ func Sub(a, b *Var) (*Var, error) {
 // product; see MatMul for the matrix product).
 func Mul(a, b *Var) (*Var, error) {
 	return newNode(mulOp{}, a, b)
+}
+
+// MulBroadcastCols returns a new Var computing a * row, broadcasting
+// row (which must be (1, a.Cols)) down every one of a's rows — see
+// mat.Matrix.MulBroadcastCols.
+func MulBroadcastCols(a, row *Var) (*Var, error) {
+	return newNode(mulBroadcastColsOp{}, a, row)
 }
 
 // Min returns a new Var computing elementwise min(a, b).

@@ -470,6 +470,122 @@ func TestGradientCheckSmallNetworkEndToEnd(t *testing.T) {
 	assertMatricesClose(t, b1.Grad, numericalGradient(b1, loss, graph.Forward), gradCheckTolerance)
 }
 
+// --- Batched recurrent training primitives ---
+//
+// AddBias, MulBroadcastCols, and per-column Softmax/SoftmaxAddGrad only
+// started doing genuinely different work once batchSize > 1 (at
+// batchSize == 1 they reduce to plain Add/a scalar multiply/the
+// original whole-matrix Softmax, already covered above and throughout
+// this package's other tests). These gradient-check each one at
+// batchSize == 3 specifically, so a bug that only shows up once columns
+// stop being trivially singular — e.g. broadcasting along the wrong
+// axis, or letting one column's dot-product/sum leak into another's —
+// gets caught here rather than surfacing later as training that
+// mysteriously doesn't learn.
+
+func TestGradientCheckAddBiasBroadcastsAcrossBatchColumns(t *testing.T) {
+	rng := rand.New(rand.NewPCG(10, 20))
+	const rows, batchSize = 4, 3
+
+	in := NewVar(rows, batchSize, FlagRequiresGrad)
+	in.Val.FillRand(rng, -1, 1)
+	bias := NewVar(rows, 1, FlagRequiresGrad)
+	bias.Val.FillRand(rng, -1, 1)
+
+	out, err := AddBias(in, bias)
+	require.NoError(t, err)
+
+	// Compose with a weight that varies per column so collapsing all
+	// columns together (the bug a broadcast in the wrong direction would
+	// produce) would change the gradient, unlike a sum that treats every
+	// column identically.
+	weight := NewVar(rows, batchSize, FlagNone)
+	weight.Val.FillRand(rng, -2, 2)
+	weighted, err := Mul(out, weight)
+	require.NoError(t, err)
+
+	graph := BuildGraph(weighted)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, in.Grad, numericalGradient(in, weighted, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, bias.Grad, numericalGradient(bias, weighted, graph.Forward), gradCheckTolerance)
+}
+
+func TestGradientCheckMulBroadcastColsBroadcastsPerColumnScalar(t *testing.T) {
+	rng := rand.New(rand.NewPCG(30, 40))
+	const rows, batchSize = 5, 3
+
+	a := NewVar(rows, batchSize, FlagRequiresGrad)
+	a.Val.FillRand(rng, -1, 1)
+	row := NewVar(1, batchSize, FlagRequiresGrad)
+	row.Val.FillRand(rng, -1, 1)
+
+	out, err := MulBroadcastCols(a, row)
+	require.NoError(t, err)
+
+	weight := NewVar(rows, batchSize, FlagNone)
+	weight.Val.FillRand(rng, -2, 2)
+	weighted, err := Mul(out, weight)
+	require.NoError(t, err)
+
+	graph := BuildGraph(weighted)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, a.Grad, numericalGradient(a, weighted, graph.Forward), gradCheckTolerance)
+	assertMatricesClose(t, row.Grad, numericalGradient(row, weighted, graph.Forward), gradCheckTolerance)
+}
+
+// TestGradientCheckBatchedSoftmaxIsIndependentPerColumn gradient-checks
+// Softmax at batchSize > 1 end to end through ReinforceLoss (mirroring
+// TestGradientCheckReinforceLossWithActionMask's single-column version),
+// with every column given a different action mask and advantage. A
+// softmax that accidentally normalized or differentiated across the
+// whole matrix instead of per column would still pass a same-input,
+// single-column test but fail here, since the columns' own
+// distributions would then depend on each other.
+func TestGradientCheckBatchedSoftmaxIsIndependentPerColumn(t *testing.T) {
+	const outputSize, batchSize = 3, 3
+
+	logits := NewVar(outputSize, batchSize, FlagRequiresGrad)
+	logits.Val.Data = []float32{
+		0.4, 1.1, -0.3,
+		-0.9, 0.2, 0.8,
+		1.3, -1.4, 0.5,
+	}
+	logits.Grad = mat.New(outputSize, batchSize)
+
+	// A different action masked out per column (column 0: action 1;
+	// column 1: action 0; column 2: action 2).
+	maskBias := &Var{Val: &mat.Matrix{Rows: outputSize, Cols: batchSize, Data: []float32{
+		0, -1e9, 0,
+		-1e9, 0, 0,
+		0, 0, -1e9,
+	}}}
+
+	maskedLogits, err := Add(logits, maskBias)
+	require.NoError(t, err)
+
+	probs, err := Softmax(maskedLogits)
+	require.NoError(t, err)
+
+	advantages := &Var{Val: &mat.Matrix{Rows: outputSize, Cols: batchSize, Data: []float32{
+		1.0, 0, 0,
+		0, -2.0, 0,
+		0, 0, 0.5,
+	}}}
+
+	loss, err := ReinforceLoss(probs, advantages)
+	require.NoError(t, err)
+
+	graph := BuildGraph(loss)
+	graph.Forward()
+	graph.Backward()
+
+	assertMatricesClose(t, logits.Grad, numericalGradient(logits, loss, graph.Forward), gradCheckTolerance)
+}
+
 // TestGradientCheckSmallNetworkWithEntropyBonusEndToEnd is
 // TestGradientCheckSmallNetworkEndToEnd with an entropy bonus
 // (entropyCoef*sum_a(-probs[a]*log(probs[a]))) subtracted from the
