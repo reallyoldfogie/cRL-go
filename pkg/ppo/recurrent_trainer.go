@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
+	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
 	"github.com/reallyoldfogie/cRL-go/pkg/reinforce"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
@@ -45,6 +47,32 @@ type RecurrentTrainer struct {
 
 	params  *actorcritic.RecurrentParams
 	network *RecurrentTrainingNetwork
+
+	// updateReplicas are extra RecurrentTrainingNetwork instances built
+	// purely so trainOnChunkMinibatch can replay several of a minibatch's
+	// chunks at once, one goroutine per network - see its own doc
+	// comment. Built once, in newRecurrentTrainer, sized off runtime.
+	// NumCPU() rather than a fixed constant: this package has no
+	// business guessing at a host's core count, and the host this
+	// actually mattered on (2026-11-22, see trainOnChunkMinibatch) has
+	// far fewer cores than a typical MinibatchSize. Empty on a
+	// single-core host - tr.network alone then does all the work exactly
+	// as before this existed. Every replica is built from the exact same
+	// tr.params via the exact same NewRecurrentTrainingNetwork call as
+	// tr.network itself, so each one's Actor.Parameters() lists the same
+	// underlying weights in the same order as tr.network's own (see
+	// addReplicaGradients) - the only thing that differs between
+	// replicas is which Var instances wrap those weights, never the
+	// weights themselves (autograd.Parameter aliases Val, allocates a
+	// fresh Grad - see its own doc comment), so running them
+	// concurrently against the same tr.params is exactly as safe as the
+	// concurrent read-only inference graphs rollout collection already
+	// builds against it (see autograd.Constant's doc comment) - the
+	// update phase and rollout collection never overlap in time anyway
+	// (RunEpoch holds tr.params.Lock() for every trainOnChunkMinibatch
+	// call), so this doesn't add a new way for the two to race, only a
+	// new way for the update phase itself to use more than one core.
+	updateReplicas []*RecurrentTrainingNetwork
 
 	// policyAdam and valueAdam clip and step the policy and value
 	// branches independently (each against settings.MaxGradNorm on only
@@ -203,22 +231,65 @@ func newRecurrentTrainer(settings config.Settings, env rl.Environment, initRNG *
 		return nil, err
 	}
 
-	network, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, LossConfig{
+	lossCfg := LossConfig{
 		ClipEpsilon: settings.ClipEpsilon,
 		EntropyCoef: settings.EntropyCoef,
 		ValueCoef:   settings.ValueCoef,
-	})
+	}
+	network, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, lossCfg)
 	if err != nil {
 		return nil, fmt.Errorf("ppo: building recurrent training network: %w", err)
 	}
 
+	replicas, err := newUpdateReplicas(params, settings, lossCfg)
+	if err != nil {
+		return nil, err
+	}
+
 	return &RecurrentTrainer{
-		settings:   settings,
-		params:     params,
-		network:    network,
-		policyAdam: actorcritic.NewAdamWithGradClip(network.Actor.PolicyParameters(), settings.LearningRate, settings.MaxGradNorm),
-		valueAdam:  actorcritic.NewAdamWithGradClip(network.Actor.ValueParameters(), settings.LearningRate, settings.MaxGradNorm),
+		settings:       settings,
+		params:         params,
+		network:        network,
+		updateReplicas: replicas,
+		policyAdam:     actorcritic.NewAdamWithGradClip(network.Actor.PolicyParameters(), settings.LearningRate, settings.MaxGradNorm),
+		valueAdam:      actorcritic.NewAdamWithGradClip(network.Actor.ValueParameters(), settings.LearningRate, settings.MaxGradNorm),
 	}, nil
+}
+
+// updateWorkerCount is how many RecurrentTrainingNetwork instances
+// (tr.network plus tr.updateReplicas) trainOnChunkMinibatch splits a
+// minibatch's chunks across - runtime.NumCPU(), capped at
+// settings.MinibatchSize since a worker with no chunk ever assigned to
+// it would just be wasted memory, and floored at 1 so a single-core
+// host (or MinibatchSize==1) still works exactly as before this existed.
+func updateWorkerCount(settings config.Settings) int {
+	n := runtime.NumCPU()
+	if n > settings.MinibatchSize {
+		n = settings.MinibatchSize
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// newUpdateReplicas builds the extra RecurrentTrainingNetwork instances
+// tr.updateReplicas holds - see its own doc comment for why these are
+// safe to run concurrently against the same params as tr.network.
+// Returns an empty (non-nil-safe-to-range) slice when updateWorkerCount
+// is 1, so trainOnChunkMinibatch's single-threaded case needs no special
+// casing.
+func newUpdateReplicas(params *actorcritic.RecurrentParams, settings config.Settings, lossCfg LossConfig) ([]*RecurrentTrainingNetwork, error) {
+	extra := updateWorkerCount(settings) - 1
+	replicas := make([]*RecurrentTrainingNetwork, extra)
+	for i := range extra {
+		replica, err := NewRecurrentTrainingNetwork(params, settings.RecurrentChunkLen, lossCfg)
+		if err != nil {
+			return nil, fmt.Errorf("ppo: building update replica network %d: %w", i, err)
+		}
+		replicas[i] = replica
+	}
+	return replicas, nil
 }
 
 // validateRecurrentParamsShape mirrors validateParamsShape for
@@ -530,13 +601,17 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, ep
 	return rollouts, nil
 }
 
-// trainOnChunkMinibatch replays every chunk in minibatch through the
-// shared RecurrentTrainingNetwork sequentially, accumulating gradients
-// from the one combined (policy + value + entropy) graph, then applies
-// an independent Adam step to each branch, each averaged over the real
-// timestep count and clipped against only its own gradient norm. Because
-// the policy and value branches never share a Var (see
-// actorcritic.RecurrentChunkTrainingNetwork.PolicyParameters/
+// trainOnChunkMinibatch replays every chunk in minibatch, split across
+// tr.network and tr.updateReplicas (one goroutine per network, each
+// replaying its own share sequentially exactly as the pre-parallel
+// version replayed the whole minibatch), accumulating gradients from
+// each network's own combined (policy + value + entropy) graph. Once
+// every goroutine finishes, every replica's gradient is summed into
+// tr.network's own (see addReplicaGradients) before applying an
+// independent Adam step to each branch off that combined gradient, each
+// averaged over the real timestep count and clipped against only its
+// own gradient norm. Because the policy and value branches never share a
+// Var (see actorcritic.RecurrentChunkTrainingNetwork.PolicyParameters/
 // ValueParameters), this one combined backward pass already leaves each
 // branch's .Grad holding exactly that branch's own gradient — reading
 // policyAdam/valueAdam's norms separately is exact, not an
@@ -544,26 +619,54 @@ func (tr *RecurrentTrainer) collectRecurrentRolloutsPool(ctx context.Context, ep
 // to measure them (contrast Trainer.trainOnMinibatch, whose plain,
 // non-recurrent network does share its trunk between both heads and so
 // still needs one).
+//
+// Splitting chunks evenly by count (not work-stealing, unlike rollout
+// collection) is deliberate: every chunk here costs the same fixed
+// amount of work (one Forward/Backward over exactly RecurrentChunkLen
+// timesteps), unlike a rollout's episode length, which varies with how
+// quickly the live env happened to finish - there's no slow/fast split
+// to steal work from here, so a static split needs no shared counter.
 func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) epochDiagnostics {
-	var diagnostics epochDiagnostics
 	cfg := LossConfig{ClipEpsilon: tr.settings.ClipEpsilon, EntropyCoef: tr.settings.EntropyCoef, ValueCoef: tr.settings.ValueCoef}
 	realSteps := recurrentRealStepCount(minibatch)
 	if realSteps == 0 {
-		return diagnostics
+		return epochDiagnostics{}
 	}
 
-	tr.network.Actor.ZeroGrad()
-	for _, chunk := range minibatch {
-		tr.network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
-		tr.network.Graph.Forward()
-		for t, step := range chunk.Steps {
-			if !step.Real {
-				continue
-			}
-			diagnostics.observeStep(tr.network.Actor.PolicyOutput[t].Val.Data, tr.network.Actor.ValueOutput[t].Val.Data[0], step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
+	networks := make([]*RecurrentTrainingNetwork, 0, 1+len(tr.updateReplicas))
+	networks = append(networks, tr.network)
+	networks = append(networks, tr.updateReplicas...)
+	shares := splitChunksAcross(minibatch, len(networks))
+
+	perWorker := make([]epochDiagnostics, len(networks))
+	var wg sync.WaitGroup
+	for i, network := range networks {
+		share := shares[i]
+		if len(share) == 0 {
+			network.Actor.ZeroGrad()
+			continue
 		}
-		tr.network.Graph.Backward()
+		wg.Add(1)
+		go func(i int, network *RecurrentTrainingNetwork, share []recurrentChunk) {
+			defer wg.Done()
+			perWorker[i] = trainNetworkOnChunks(network, share, cfg)
+		}(i, network, share)
 	}
+	wg.Wait()
+
+	var diagnostics epochDiagnostics
+	for _, d := range perWorker {
+		diagnostics.policyLossSum += d.policyLossSum
+		diagnostics.valueLossSum += d.valueLossSum
+		diagnostics.entropySum += d.entropySum
+		diagnostics.steps += d.steps
+	}
+
+	replicaParams := make([][]*autograd.Var, len(networks)-1)
+	for i, replica := range networks[1:] {
+		replicaParams[i] = replica.Actor.Parameters()
+	}
+	addReplicaGradients(tr.network.Actor.Parameters(), replicaParams)
 
 	policyGradientNorm := tr.policyAdam.GradientNorm(realSteps)
 	valueGradientNorm := tr.valueAdam.GradientNorm(realSteps)
@@ -574,6 +677,66 @@ func (tr *RecurrentTrainer) trainOnChunkMinibatch(minibatch []recurrentChunk) ep
 	tr.policyAdam.Step(realSteps)
 	tr.valueAdam.Step(realSteps)
 	return diagnostics
+}
+
+// trainNetworkOnChunks is one goroutine's share of trainOnChunkMinibatch:
+// zero network's gradient, then replay every chunk in share through it
+// sequentially, exactly like the body of the pre-parallel
+// trainOnChunkMinibatch did for the whole minibatch. Safe to run
+// concurrently with any other call of this on a different network
+// instance (even one built from the same underlying params) - see
+// RecurrentTrainer.updateReplicas' own doc comment for why.
+func trainNetworkOnChunks(network *RecurrentTrainingNetwork, share []recurrentChunk, cfg LossConfig) epochDiagnostics {
+	var diagnostics epochDiagnostics
+	network.Actor.ZeroGrad()
+	for _, chunk := range share {
+		network.SetSplitChunk(chunk.Steps, chunk.PolicyHPrevStart, chunk.PolicyCPrevStart, chunk.ValueHPrevStart, chunk.ValueCPrevStart)
+		network.Graph.Forward()
+		for t, step := range chunk.Steps {
+			if !step.Real {
+				continue
+			}
+			diagnostics.observeStep(network.Actor.PolicyOutput[t].Val.Data, network.Actor.ValueOutput[t].Val.Data[0], step.OldLogProb, step.Advantage, step.Return, step.Action, cfg)
+		}
+		network.Graph.Backward()
+	}
+	return diagnostics
+}
+
+// splitChunksAcross divides chunks into n near-even, contiguous shares
+// (the first len(chunks)%n shares get one extra chunk), for n >= 1.
+// Always returns exactly n slices, some possibly empty if n > len(chunks).
+func splitChunksAcross(chunks []recurrentChunk, n int) [][]recurrentChunk {
+	shares := make([][]recurrentChunk, n)
+	base := len(chunks) / n
+	extra := len(chunks) % n
+	start := 0
+	for i := range n {
+		size := base
+		if i < extra {
+			size++
+		}
+		shares[i] = chunks[start : start+size]
+		start += size
+	}
+	return shares
+}
+
+// addReplicaGradients sums each entry of every slice in replicaParams
+// into the correspondingly-indexed entry of primary's own Grad, in the
+// fixed order Parameters() always returns its Vars in (see
+// RecurrentChunkTrainingNetwork.Parameters' own doc comment) - safe
+// because every replica network was built from the exact same
+// actorcritic.RecurrentParams as the network primary's Vars came from
+// (see RecurrentTrainer.updateReplicas), so every list describes the
+// same underlying weights in the same order, just via independent
+// Var/Grad wrappers (autograd.Parameter's own doc comment).
+func addReplicaGradients(primary []*autograd.Var, replicaParams [][]*autograd.Var) {
+	for _, params := range replicaParams {
+		for i, p := range primary {
+			_ = p.Grad.Add(p.Grad, params[i].Grad)
+		}
+	}
 }
 
 // l2Combine returns the L2 norm of the concatenation of two

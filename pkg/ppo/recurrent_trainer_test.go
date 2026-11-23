@@ -116,6 +116,57 @@ func TestRecurrentChunkReplayMatchesCollectionOutputs(t *testing.T) {
 	assert.Equal(t, len(rollout.Episode.Transitions), stepIndex)
 }
 
+// TestTrainOnChunkMinibatchParallelMatchesSingleThreaded confirms
+// splitting a minibatch's chunks across tr.updateReplicas (see its own
+// doc comment) accumulates the exact same gradient, up to
+// floating-point summation-order noise, as running every chunk through
+// tr.network alone - the parallel update computes the same quantity
+// faster, it doesn't change what gets learned. Compares Grad directly
+// rather than the post-Adam.Step weights, since Adam's own moving
+// averages would make a tiny floating-point difference in the input
+// harder to bound than it is right where the two paths actually differ.
+func TestTrainOnChunkMinibatchParallelMatchesSingleThreaded(t *testing.T) {
+	settings := smallRecurrentTestSettings()
+	settings.MinibatchSize = 8
+
+	seedParams := func() *actorcritic.RecurrentParams {
+		rng := rand.New(rand.NewPCG(17, 29))
+		return actorcritic.NewRecurrentParams(rng, snakeenv.StateVectorSize(settings.GridSize), settings.HiddenSize, snakeenv.NumActions, 2)
+	}
+
+	var chunks []recurrentChunk
+	for i := range 8 {
+		rollout, err := collectRecurrentTrajectory(context.Background(), seedParams(), snakeEnvFactory(settings.GridSize), 30, rand.New(rand.NewPCG(uint64(31+i), uint64(47+i))))
+		require.NoError(t, err)
+		advantages, returns := ComputeGAE(rollout.Rollout, settings.Gamma, settings.GAELambda)
+		chunks = append(chunks, chunkRollout(rollout, advantages, returns, settings.RecurrentChunkLen, seedParams().InputSize())...)
+	}
+	require.Greater(t, len(chunks), 1, "need more than one chunk to actually exercise more than one worker")
+
+	trainerParallel, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), seedParams())
+	require.NoError(t, err)
+	if len(trainerParallel.updateReplicas) == 0 {
+		t.Skip("this host has only one usable core for the update phase - nothing to compare against")
+	}
+
+	trainerSingle, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), seedParams())
+	require.NoError(t, err)
+	trainerSingle.updateReplicas = nil
+
+	trainerParallel.trainOnChunkMinibatch(chunks)
+	trainerSingle.trainOnChunkMinibatch(chunks)
+
+	parallelParams := trainerParallel.network.Actor.Parameters()
+	singleParams := trainerSingle.network.Actor.Parameters()
+	require.Equal(t, len(singleParams), len(parallelParams))
+	for i := range singleParams {
+		for j := range singleParams[i].Grad.Data {
+			assert.InDelta(t, singleParams[i].Grad.Data[j], parallelParams[i].Grad.Data[j], 1e-3,
+				"parameter %d, element %d: parallel-accumulated gradient diverged from the single-threaded reference", i, j)
+		}
+	}
+}
+
 func TestMaskedRecurrentReplayRatioMatchesCollection(t *testing.T) {
 	rng := rand.New(rand.NewPCG(71, 73))
 	params := actorcritic.NewRecurrentParams(rng, 4, 6, 3, 2)
