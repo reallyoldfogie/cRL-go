@@ -10,6 +10,7 @@ import (
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
+	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 	"github.com/reallyoldfogie/cRL-go/pkg/reinforce"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 )
@@ -201,6 +202,8 @@ func NewWithPersistentEnvPool(settings config.Settings, envs []rl.Environment, i
 // the returned Trainer; callers set either envFactory or persistentEnv
 // afterward depending on which constructor they came from.
 func newTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand, initialParams *ActorCriticParams) (*Trainer, error) {
+	mat.SetBLASBackend(!settings.DisableBLAS)
+
 	var policyParams, valueParams *actorcritic.Params
 	switch {
 	case initialParams == nil:

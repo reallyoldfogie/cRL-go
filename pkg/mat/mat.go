@@ -202,6 +202,12 @@ func (dst *Matrix) Neg(in *Matrix) error {
 // depending on transposeA/transposeB. If zeroOut is true, dst is cleared
 // first; otherwise results are accumulated into dst's existing values
 // (used by the autograd backward pass to accumulate gradients).
+//
+// Delegates the actual multiply to gonum's blas32.Gemm by default, or to
+// this package's own matMulNN/NT/TN/TT loops if SetBLASBackend(false)
+// has been called — every shape/argument check below runs identically
+// either way, so the two backends can only ever disagree on the
+// arithmetic itself, never on what inputs they accept.
 func (dst *Matrix) MatMul(a, b *Matrix, zeroOut, transposeA, transposeB bool) error {
 	aRows, aCols := a.Rows, a.Cols
 	if transposeA {
@@ -218,6 +224,11 @@ func (dst *Matrix) MatMul(a, b *Matrix, zeroOut, transposeA, transposeB bool) er
 	}
 	if dst.Rows != aRows || dst.Cols != bCols {
 		return fmt.Errorf("mat: matmul output shape mismatch: want %dx%d, got %dx%d", aRows, bCols, dst.Rows, dst.Cols)
+	}
+
+	if useBLAS.Load() {
+		matMulBLAS(dst, a, b, zeroOut, transposeA, transposeB)
+		return nil
 	}
 
 	if zeroOut {

@@ -100,6 +100,19 @@ type Settings struct {
 	// Enforced minimum of 1 (see Validate) - 0 would silently undo the
 	// whole point of this field. Defaults to 2.
 	UpdateReservedCPUs int `json:"update_reserved_cpus"`
+
+	// DisableBLAS turns off pkg/mat's gonum-backed BLAS matmul (see
+	// pkg/mat.SetBLASBackend), falling back to this package's own
+	// original hand-written loops, process-wide. Named so its zero
+	// value (false) is the recommended default - BLAS enabled - even
+	// for a Settings built as a struct literal rather than via Default
+	// (as most of this package's own tests do): a field that defaulted
+	// to "on" would need every such literal updated to opt in, which is
+	// exactly backwards from "BLAS being the default" (2026-11-23).
+	// Wired up once per trainer construction - see
+	// pkg/ppo.newTrainer/newRecurrentTrainer - not validated here since
+	// every bool value is meaningful.
+	DisableBLAS bool `json:"disable_blas"`
 }
 
 // Default returns the out-of-the-box hyperparameters, matching the

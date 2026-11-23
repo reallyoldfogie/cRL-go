@@ -10,6 +10,7 @@ import (
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
+	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 	"github.com/reallyoldfogie/cRL-go/pkg/snakeenv"
 	"github.com/stretchr/testify/assert"
@@ -28,6 +29,24 @@ func smallRecurrentTestSettings() config.Settings {
 // epochs against a toy environment, with no NaNs or panics, confirming
 // the whole chunked-BPTT pipeline (rollout collection, GAE, chunking,
 // padding, shuffled-minibatch Adam updates) works end to end.
+// TestNewRecurrentWiresDisableBLASSetting mirrors
+// TestNewWiresDisableBLASSetting (trainer_test.go) for NewRecurrent -
+// see newRecurrentTrainer.
+func TestNewRecurrentWiresDisableBLASSetting(t *testing.T) {
+	t.Cleanup(func() { mat.SetBLASBackend(true) })
+
+	settings := smallRecurrentTestSettings()
+	settings.DisableBLAS = true
+	_, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+	assert.False(t, mat.BLASBackendEnabled())
+
+	settings.DisableBLAS = false
+	_, err = NewRecurrent(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+	assert.True(t, mat.BLASBackendEnabled())
+}
+
 func TestRecurrentRunEpochSmokeTestNoPanicsOrNaNs(t *testing.T) {
 	settings := smallRecurrentTestSettings()
 	trainer, err := NewRecurrent(settings, snakeEnvFactory(settings.GridSize), nil)

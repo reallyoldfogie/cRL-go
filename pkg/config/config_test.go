@@ -103,6 +103,26 @@ func TestDefaultUpdateReservedCPUsIsTwo(t *testing.T) {
 	assert.Equal(t, 2, Default().UpdateReservedCPUs)
 }
 
+// TestDefaultAndZeroValueSettingsBothEnableBLAS pins DisableBLAS's
+// field-naming choice: both Default() and a bare Settings{} (as this
+// package's own tests build - see smallTestSettings/
+// smallRecurrentTestSettings in pkg/ppo) must leave BLAS enabled,
+// since DisableBLAS's whole point is a zero value that already means
+// "on."
+func TestDefaultAndZeroValueSettingsBothEnableBLAS(t *testing.T) {
+	assert.False(t, Default().DisableBLAS)
+	assert.False(t, Settings{}.DisableBLAS)
+}
+
+func TestLoadOverridesDisableBLAS(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, writeFile(path, `{"disable_blas": true}`))
+
+	settings, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, settings.DisableBLAS)
+}
+
 func TestApplyOnlyOverridesExplicitlyPassedFlags(t *testing.T) {
 	settings := Default()
 

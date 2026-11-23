@@ -12,6 +12,7 @@ import (
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/autograd"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
+	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 	"github.com/reallyoldfogie/cRL-go/pkg/reinforce"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 )
@@ -217,6 +218,8 @@ func NewRecurrentWithPersistentEnvPool(settings config.Settings, envs []rl.Envir
 // RecurrentTrainer; callers set envFactory/persistentEnv/persistentEnvs
 // afterward depending on which constructor they came from.
 func newRecurrentTrainer(settings config.Settings, env rl.Environment, initRNG *rand.Rand, initialParams *actorcritic.RecurrentParams) (*RecurrentTrainer, error) {
+	mat.SetBLASBackend(!settings.DisableBLAS)
+
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}

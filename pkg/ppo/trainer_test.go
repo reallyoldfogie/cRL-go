@@ -9,6 +9,7 @@ import (
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
 	"github.com/reallyoldfogie/cRL-go/pkg/gridworldenv"
+	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 	"github.com/reallyoldfogie/cRL-go/pkg/reinforce"
 	"github.com/reallyoldfogie/cRL-go/pkg/rl"
 	"github.com/reallyoldfogie/cRL-go/pkg/snakeenv"
@@ -79,6 +80,24 @@ func TestRunEpochIsDeterministicForAFixedSeed(t *testing.T) {
 	// goroutine scheduling order (see reinforce.WorkerRNG's
 	// documentation), including the minibatch shuffle order.
 	assert.Equal(t, statsA, statsB)
+}
+
+// TestNewWiresDisableBLASSetting confirms New actually flips pkg/mat's
+// process-wide backend switch from settings.DisableBLAS, rather than
+// only validating/storing the field - see newTrainer.
+func TestNewWiresDisableBLASSetting(t *testing.T) {
+	t.Cleanup(func() { mat.SetBLASBackend(true) })
+
+	settings := smallTestSettings()
+	settings.DisableBLAS = true
+	_, err := New(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+	assert.False(t, mat.BLASBackendEnabled())
+
+	settings.DisableBLAS = false
+	_, err = New(settings, snakeEnvFactory(settings.GridSize), nil)
+	require.NoError(t, err)
+	assert.True(t, mat.BLASBackendEnabled())
 }
 
 func TestRunEpochRejectsInvalidSettings(t *testing.T) {
