@@ -8,8 +8,11 @@ import (
 
 	"github.com/reallyoldfogie/cRL-go/pkg/actorcritic"
 	"github.com/reallyoldfogie/cRL-go/pkg/config"
+	"github.com/reallyoldfogie/cRL-go/pkg/mat"
 	"github.com/reallyoldfogie/cRL-go/pkg/snakeenv"
 )
+
+func boolPtr(b bool) *bool { return &b }
 
 // benchmarkRecurrentChunks builds at least numChunks chunks of chunkLen
 // steps each from fresh rollouts against params, for
@@ -187,6 +190,14 @@ func newRecurrentTrainerForBench(params *actorcritic.RecurrentParams, settings c
 // training, not configs/config.json's shipped 128/2 default — ask
 // before trusting these numbers for a differently-sized network.
 //
+// Two extra cases bookend the "sequential"/"batched" comparison with
+// pkg/mat's BLAS backend toggled explicitly, so this one benchmark also
+// shows the full before/after across everything this session changed:
+// "sequential-naive" is genuinely how this trainer behaved before any
+// of today's work (one chunk at a time, this package's own matmul
+// loops); "batched-blas" is today's actual default (BLAS enabled,
+// batched at the sweet spot) with nothing forced either way.
+//
 //	go test ./pkg/ppo/ -run '^$' -bench BenchmarkRecurrentChunkTrainingFullWorkerSplit -benchtime=5x
 func BenchmarkRecurrentChunkTrainingFullWorkerSplit(b *testing.B) {
 	const (
@@ -206,6 +217,7 @@ func BenchmarkRecurrentChunkTrainingFullWorkerSplit(b *testing.B) {
 	rng := rand.New(rand.NewPCG(17, 19))
 	params := actorcritic.NewRecurrentParams(rng, snakeenv.StateVectorSize(gridSize), hiddenSize, snakeenv.NumActions, numHiddenLayers)
 	chunks := benchmarkRecurrentChunks(b, params, gridSize, episodeLen, chunkLen, numChunks)
+	b.Cleanup(func() { mat.SetBLASBackend(true) })
 
 	workers := updateWorkerCount(settings)
 	sweetSpot := maxUpdateBatchSize(settings)
@@ -214,15 +226,21 @@ func BenchmarkRecurrentChunkTrainingFullWorkerSplit(b *testing.B) {
 	cases := []struct {
 		name      string
 		batchSize int
+		useBLAS   *bool // nil leaves pkg/mat's backend as whatever it already is
 	}{
-		{"sequential", 1},
-		{"batched", sweetSpot},
+		{"sequential-naive", 1, boolPtr(false)},
+		{"sequential", 1, nil},
+		{"batched", sweetSpot, nil},
+		{"batched-blas", sweetSpot, boolPtr(true)},
 	}
 	for _, c := range cases {
 		b.Run(fmt.Sprintf("%s(batch=%d)x%dworkers", c.name, c.batchSize, workers), func(b *testing.B) {
 			tr, err := newRecurrentTrainerForBench(params, settings, c.batchSize)
 			if err != nil {
 				b.Fatalf("building trainer: %v", err)
+			}
+			if c.useBLAS != nil {
+				mat.SetBLASBackend(*c.useBLAS)
 			}
 
 			b.ResetTimer()
