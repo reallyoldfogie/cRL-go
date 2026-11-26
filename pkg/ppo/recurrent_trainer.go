@@ -92,12 +92,40 @@ type RecurrentTrainer struct {
 	// trajectories from scratch - see SetRolloutProgress/ResumeRollouts.
 	rolloutProgress RolloutCollected
 	resumeRollouts  []*RecurrentRollout
+
+	// updateProgress supports reporting live progress through an epoch's
+	// PPOEpochs-passes-of-shuffled-minibatch-Adam-updates phase, distinct
+	// from rolloutProgress above (which only covers the earlier rollout-
+	// *collection* phase) - see SetUpdateProgress.
+	updateProgress MinibatchProgress
 }
 
 // RolloutCollected is called by collectRollouts (via RunEpoch)
 // immediately after one trajectory finishes collecting successfully -
 // see RecurrentTrainer.SetRolloutProgress.
 type RolloutCollected func(epoch, index int, rollout *RecurrentRollout)
+
+// MinibatchProgress is called by RunEpoch once after every minibatch
+// Adam update during the PPO-update phase (settings.PPOEpochs passes
+// over the shuffled, chunked rollout data) - see
+// RecurrentTrainer.SetUpdateProgress. completed counts up from 1 to
+// total, both fixed for the whole call (total is PPOEpochs times however
+// many minibatches one pass splits this epoch's data into - known before
+// the update phase starts, unlike rollout collection's own trajectory
+// count, which is why this needs no separate "resume" counterpart the
+// way RolloutCollected has ResumeRollouts).
+type MinibatchProgress func(epoch, completed, total int)
+
+// SetUpdateProgress registers fn to be called once after each minibatch
+// Adam update completes during RunEpoch's PPO-update phase - a caller
+// driving a live progress indicator (a Prometheus gauge, a Minecraft
+// bossbar, ...) for the one phase per epoch where nothing else gives any
+// indication of how far along it is. fn runs synchronously on RunEpoch's
+// own goroutine, between minibatches, so it must be fast - a slow fn
+// directly delays every remaining minibatch this epoch.
+func (tr *RecurrentTrainer) SetUpdateProgress(fn MinibatchProgress) {
+	tr.updateProgress = fn
+}
 
 // SetRolloutProgress registers fn to be called once for each freshly
 // collected trajectory this epoch (never for one supplied via
@@ -405,6 +433,16 @@ func (tr *RecurrentTrainer) RunEpoch(ctx context.Context, epoch int) (EpochStats
 
 	normalizeRecurrentAdvantages(chunks)
 
+	// Known before the update phase starts (unlike rollout collection's
+	// own trajectory count - see MinibatchProgress's own doc comment),
+	// so updateProgress can report a meaningful total from its very
+	// first call rather than only once the epoch is already over.
+	minibatchesPerPass := 0
+	if len(chunks) > 0 && tr.settings.MinibatchSize > 0 {
+		minibatchesPerPass = (len(chunks) + tr.settings.MinibatchSize - 1) / tr.settings.MinibatchSize
+	}
+	totalMinibatches := tr.settings.PPOEpochs * minibatchesPerPass
+
 	shuffleRNG := reinforce.WorkerRNG(tr.settings.Seed, epoch, shuffleWorkerIndex)
 	updateCount := 0
 	var diagnostics epochDiagnostics
@@ -429,6 +467,9 @@ func (tr *RecurrentTrainer) RunEpoch(ctx context.Context, epoch int) (EpochStats
 			diagnostics.valueGradNormSum += diagnosticsForBatch.valueGradNormSum
 			diagnostics.updates += diagnosticsForBatch.updates
 			updateCount++
+			if tr.updateProgress != nil {
+				tr.updateProgress(epoch, updateCount, totalMinibatches)
+			}
 		}
 	}
 
